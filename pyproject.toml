@@ -1,0 +1,14 @@
+[project]
+name = "polymarket-backtest"
+version = "0.1.0"
+description = "Leakage-safe Polymarket backtesting architecture with Grok replay mode"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+polymarket-backtest = "polymarket_backtest:main"
+
+[build-system]
+requires = ["uv_build>=0.8.14,<0.9.0"]
+build-backend = "uv_build"
