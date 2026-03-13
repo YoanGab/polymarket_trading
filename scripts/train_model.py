@@ -1068,6 +1068,43 @@ def main() -> None:
         print(f"  Markets: {len(set(dataset.market_ids))}")
         split = walk_forward_split(dataset)
 
+    # Drop features unavailable at inference (ml_transport passes prev_rows=[] and no tags)
+    # Keep only features that extract_snapshot_features produces with no history
+    INFERENCE_AVAILABLE = {
+        # Raw price features dropped — they make model predict ≈ mid (no edge)
+        # "mid", "best_bid", "best_ask", "last_trade",
+        "spread",
+        "spread_pct",
+        "price_vs_half",
+        "price_extreme",
+        "volume_1m",
+        "volume_24h",
+        "open_interest",
+        "volume_oi_ratio",
+        "trend",
+        "trend_pct",
+        "extreme_x_spread",
+        "extreme_x_volume",
+        "hours_to_resolution",
+        "log_hours_to_resolution",
+        "resolution_proximity",
+    }
+    keep_idx = [i for i, name in enumerate(feature_names) if name in INFERENCE_AVAILABLE]
+    dropped = [name for name in feature_names if name not in INFERENCE_AVAILABLE]
+    feature_names = [feature_names[i] for i in keep_idx]
+    split = WalkForwardSplit(
+        train_X=split.train_X[:, keep_idx],
+        train_y=split.train_y,
+        val_X=split.val_X[:, keep_idx],
+        val_y=split.val_y,
+        test_X=split.test_X[:, keep_idx],
+        test_y=split.test_y,
+        train_market_ids=split.train_market_ids,
+        val_market_ids=split.val_market_ids,
+        test_market_ids=split.test_market_ids,
+    )
+    print(f"  Features: {len(feature_names)} kept, {len(dropped)} dropped (unavailable at inference)")
+
     print(f"  Label balance: {split.train_y.mean():.2%} positive (train)")
     print(f"  Train: {split.train_X.shape[0]} samples ({len(set(split.train_market_ids))} markets)")
     print(f"  Val:   {split.val_X.shape[0]} samples ({len(set(split.val_market_ids))} markets)")
