@@ -8,6 +8,7 @@ catboost_info/
 .claude/scheduled_tasks.lock
 
 # Data files (large, reproduced via scripts)
+data/prepared/
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal

@@ -16,12 +16,13 @@ To set up a new experiment, work with the user to:
    - `src/polymarket_backtest/strategies.py` — strategy logic.
    - `src/polymarket_backtest/grid_search.py` — strategy grid parameters.
 4. **Verify data exists**: `ls -la data/polymarket_backtest_v2.sqlite` (should be ~19GB). If not, tell the human to run `uv run python scripts/download_exhaustive.py --fresh --workers 4` (~9h) then `uv run python scripts/backfill_events.py` (~20min).
-5. **Run the baseline**: `uv run python scripts/train_model.py --model logistic > run.log 2>&1`
-6. **Record baseline metrics**: `grep "TEST_BRIER\|VAL_BRIER" run.log`
-7. **Run baseline strategy eval**: `uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 500 > eval.log 2>&1`
-8. **Record baseline strategy**: `grep "SHARPE\|PNL\|TRADES" eval.log`
-9. **Initialize results.tsv**: Create with header row. Record baseline.
-10. **Confirm and go.**
+5. **Prepare dataset**: `uv run python scripts/prepare.py` (~10-15min). Pre-extracts features from the 19GB SQLite into fast-loading .npz files in `data/prepared/`. Only needs to run once.
+6. **Run the baseline**: `uv run python scripts/train_model.py --model logistic > run.log 2>&1`
+7. **Record baseline metrics**: `grep "TEST_BRIER\|VAL_BRIER" run.log`
+8. **Run baseline strategy eval**: `uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 500 > eval.log 2>&1`
+9. **Record baseline strategy**: `grep "SHARPE\|PNL\|TRADES" eval.log`
+10. **Initialize results.tsv**: Create with header row. Record baseline.
+11. **Confirm and go.**
 
 Once you get confirmation, kick off the experimentation.
 
@@ -38,12 +39,13 @@ There are two experiment types: **model experiments** (improving predictions) an
 - You can create new files: `scripts/train_*.py`, `src/polymarket_backtest/models/`, helper scripts.
 
 **What you CANNOT edit:**
+- `scripts/prepare.py` — dataset preparation (fixed, run once)
 - `src/polymarket_backtest/replay_engine.py` — simulation engine (fixed)
 - `src/polymarket_backtest/db.py` — database layer (fixed)
 - `src/polymarket_backtest/market_simulator.py` — order execution (fixed)
 - `src/polymarket_backtest/types.py` — type definitions (fixed)
 - `src/polymarket_backtest/metrics.py` — metric calculations (fixed)
-- `data/` — the database (fixed, read-only)
+- `data/` — the database and prepared datasets (fixed, read-only)
 
 **The goal: build a strategy that makes money with acceptable risk.**
 

@@ -26,9 +26,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from polymarket_backtest.features import build_dataset, walk_forward_split
+from polymarket_backtest.features import (
+    WalkForwardSplit,
+    build_dataset,
+    walk_forward_split,
+)
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest.sqlite"
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest_v2.sqlite"
+PREPARED_DIR = Path(__file__).resolve().parent.parent / "data" / "prepared"
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 RESULTS_TSV = Path(__file__).resolve().parent.parent / "results_ml.tsv"
 
@@ -1020,22 +1025,50 @@ def main() -> None:
     parser.add_argument("--stride", type=int, default=6, help="Snapshot stride (1=all, 6=every 6h)")
     args = parser.parse_args()
 
-    if not DB_PATH.exists():
-        print("ERROR: Database not found. Run download_data.py first.", file=sys.stderr)
-        sys.exit(1)
-
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Build dataset
-    print("Extracting features...")
-    start = time.monotonic()
-    dataset = build_dataset(DB_PATH, snapshot_stride=args.stride)
-    print(f"  Dataset: {dataset.X.shape[0]} samples, {dataset.X.shape[1]} features")
-    print(f"  Markets: {len(set(dataset.market_ids))}")
-    print(f"  Label balance: {dataset.y.mean():.2%} positive")
+    # Load dataset — prefer pre-built .npz files from prepare.py
+    meta_path = PREPARED_DIR / "meta.json"
+    if meta_path.exists():
+        print("Loading pre-built dataset from data/prepared/ ...")
+        start = time.monotonic()
+        with open(meta_path) as f:
+            meta = json.load(f)
+        feature_names = meta["feature_names"]
 
-    # Walk-forward split
-    split = walk_forward_split(dataset)
+        train_data = np.load(PREPARED_DIR / "train.npz", allow_pickle=True)
+        val_data = np.load(PREPARED_DIR / "val.npz", allow_pickle=True)
+        test_data = np.load(PREPARED_DIR / "test.npz", allow_pickle=True)
+
+        split = WalkForwardSplit(
+            train_X=train_data["X"],
+            train_y=train_data["y"],
+            val_X=val_data["X"],
+            val_y=val_data["y"],
+            test_X=test_data["X"],
+            test_y=test_data["y"],
+            train_market_ids=list(train_data["market_ids"]),
+            val_market_ids=list(val_data["market_ids"]),
+            test_market_ids=list(test_data["market_ids"]),
+        )
+        total_samples = split.train_X.shape[0] + split.val_X.shape[0] + split.test_X.shape[0]
+        print(
+            f"  Dataset: {total_samples} samples, {len(feature_names)} features (loaded in {time.monotonic() - start:.1f}s)"
+        )
+    else:
+        print("No pre-built dataset found. Run: uv run python scripts/prepare.py")
+        print("Falling back to SQLite extraction...")
+        if not DB_PATH.exists():
+            print("ERROR: Database not found. Run download_data.py first.", file=sys.stderr)
+            sys.exit(1)
+        start = time.monotonic()
+        dataset = build_dataset(DB_PATH, snapshot_stride=args.stride)
+        feature_names = feature_names
+        print(f"  Dataset: {dataset.X.shape[0]} samples, {dataset.X.shape[1]} features")
+        print(f"  Markets: {len(set(dataset.market_ids))}")
+        split = walk_forward_split(dataset)
+
+    print(f"  Label balance: {split.train_y.mean():.2%} positive (train)")
     print(f"  Train: {split.train_X.shape[0]} samples ({len(set(split.train_market_ids))} markets)")
     print(f"  Val:   {split.val_X.shape[0]} samples ({len(set(split.val_market_ids))} markets)")
     print(f"  Test:  {split.test_X.shape[0]} samples ({len(set(split.test_market_ids))} markets)")
@@ -1127,19 +1160,19 @@ def main() -> None:
         sorted_idx = np.argsort(importance)[::-1]
         print("\n  Top 10 features (by gain):")
         for i in sorted_idx[:10]:
-            print(f"    {dataset.feature_names[i]:30s}  {importance[i]:.1f}")
+            print(f"    {feature_names[i]:30s}  {importance[i]:.1f}")
 
     # Save model
     model_path = MODELS_DIR / f"{args.model}_model.pkl"
     with open(model_path, "wb") as f:
-        pickle.dump({"model": model, "feature_names": dataset.feature_names}, f)
+        pickle.dump({"model": model, "feature_names": feature_names}, f)
     print(f"\n  Model saved to: {model_path}")
 
     # Also save as default model for ml_transport
     default_path = MODELS_DIR / "lightgbm_model.pkl"
     if model_path != default_path:
         with open(default_path, "wb") as f:
-            pickle.dump({"model": model, "feature_names": dataset.feature_names}, f)
+            pickle.dump({"model": model, "feature_names": feature_names}, f)
         print(f"  Also saved as default: {default_path}")
 
     # Save metadata
@@ -1150,8 +1183,8 @@ def main() -> None:
 
     metadata = {
         "model_type": args.model,
-        "n_features": len(dataset.feature_names),
-        "feature_names": dataset.feature_names,
+        "n_features": len(feature_names),
+        "feature_names": feature_names,
         "n_train_samples": int(split.train_X.shape[0]),
         "n_val_samples": int(split.val_X.shape[0]),
         "n_test_samples": int(split.test_X.shape[0]),
@@ -1176,7 +1209,7 @@ def main() -> None:
             f"{test_bs:.6f}\t"
             f"{test_baseline - test_bs:+.6f}\t"
             f"{test_cal['ece']:.6f}\t"
-            f"{len(dataset.feature_names)}\t"
+            f"{len(feature_names)}\t"
             f"{train_time:.1f}\n"
         )
 
