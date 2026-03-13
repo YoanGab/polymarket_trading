@@ -570,12 +570,17 @@ class StrategyEngine:
                 ]
             return []
 
-        # Only target mid-range markets where uncertainty is highest
-        if not (0.30 <= market.mid <= 0.70):
+        # Target markets with significant uncertainty
+        if not (0.20 <= market.mid <= 0.80):
             return []
 
-        # Need high confidence from the forecast
-        if forecast.confidence < config.min_confidence:
+        # Adaptive confidence: stricter far from resolution, looser near resolution
+        confidence_required = config.min_confidence
+        if hours_to_res <= 24:
+            confidence_required = config.min_confidence - 0.05
+        elif hours_to_res <= 72:
+            confidence_required = config.min_confidence - 0.02
+        if forecast.confidence < confidence_required:
             return []
 
         ask_price = normalized_ask_price(market.best_ask)
@@ -587,10 +592,13 @@ class StrategyEngine:
 
         # Scale position size by proximity to resolution (closer = more confident)
         proximity_factor = max(0.3, 1.0 - hours_to_res / config.resolution_hours_max)
+        # Scale down for edge-of-range markets (further from 0.50 = less confident)
+        mid_distance = abs(market.mid - 0.50) / 0.30  # 0 at 0.50, 1 at 0.20/0.80
+        mid_factor = max(0.15, 1.0 - mid_distance * 0.85)
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         notional = min(
             config.max_position_notional,
-            available_cash * config.kelly_fraction * kelly * proximity_factor,
+            available_cash * config.kelly_fraction * kelly * proximity_factor * mid_factor,
         )
         if notional <= 0:
             return []
