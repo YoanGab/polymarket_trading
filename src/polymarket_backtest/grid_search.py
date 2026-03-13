@@ -163,6 +163,8 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             max_holding_minutes=None,
             resolution_hours_max=720.0,
             min_confidence=0.65,
+            extreme_low=0.20,
+            extreme_high=0.80,
             **shared,
         ),
         # Hold-to-resolution strategies: no time stops, let positions resolve
@@ -199,16 +201,18 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_low=0.10,
             **shared,
         ),
-        # Wider resolution convergence to get more trades
+        # Core mid-range: catch medium-edge trades in the safe zone
         StrategyConfig(
-            name="resolution_wide",
+            name="resolution_core",
             family="resolution_convergence",
-            kelly_fraction=0.08,
+            kelly_fraction=0.30,
             edge_threshold_bps=20.0,
-            max_position_notional=300.0,
+            max_position_notional=1000.0,
             max_holding_minutes=None,
-            resolution_hours_max=168.0,
-            min_confidence=0.55,
+            resolution_hours_max=720.0,
+            min_confidence=0.65,
+            extreme_low=0.30,
+            extreme_high=0.70,
             **shared,
         ),
         # Contrarian upsized: same thresholds, larger positions

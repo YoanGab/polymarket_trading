@@ -570,8 +570,10 @@ class StrategyEngine:
                 ]
             return []
 
-        # Target markets with significant uncertainty
-        if not (0.20 <= market.mid <= 0.80):
+        # Target mid-range markets (configurable via extreme_low/extreme_high)
+        mid_low = config.extreme_low
+        mid_high = config.extreme_high
+        if not (mid_low <= market.mid <= mid_high):
             return []
 
         if forecast.confidence < config.min_confidence:
@@ -585,7 +587,8 @@ class StrategyEngine:
             return []
 
         # Scale down for edge-of-range markets (further from 0.50 = less confident)
-        mid_distance = abs(market.mid - 0.50) / 0.30  # 0 at 0.50, 1 at 0.20/0.80
+        half_range = max(0.01, (mid_high - mid_low) / 2.0)
+        mid_distance = abs(market.mid - 0.50) / half_range
         mid_factor = max(0.15, 1.0 - mid_distance * 0.85)
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         notional = min(
