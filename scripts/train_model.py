@@ -1071,8 +1071,8 @@ def main() -> None:
     # Drop features unavailable at inference (ml_transport passes prev_rows=[] and no tags)
     # Keep only features that extract_snapshot_features produces with no history
     INFERENCE_AVAILABLE = {
-        # Raw price features dropped — they make model predict ≈ mid (no edge)
-        # "mid", "best_bid", "best_ask", "last_trade",
+        # Only mid as price anchor — gives direction without bid/ask copying
+        "mid",
         "spread",
         "spread_pct",
         "price_vs_half",
