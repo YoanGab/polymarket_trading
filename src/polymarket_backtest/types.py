@@ -1,11 +1,20 @@
-from __future__ import annotations
-
+import dataclasses as _dc
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, cast
+
+UTC = UTC
 
 
-UTC = timezone.utc
+def dc_replace[T](obj: T, **kwargs: Any) -> T:
+    """Typed wrapper around ``dataclasses.replace`` that satisfies ty."""
+    return cast(T, _dc.replace(cast(Any, obj), **kwargs))
+
+
+def dc_asdict(obj: Any) -> dict[str, Any]:
+    """Typed wrapper around ``dataclasses.asdict`` that satisfies ty."""
+    result: dict[str, Any] = _dc.asdict(obj)
+    return result
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -107,7 +116,16 @@ class ForecastOutput:
 @dataclass(frozen=True)
 class StrategyConfig:
     name: str
-    family: Literal["carry_only", "news_driven", "deep_research", "cross_market_arb"]
+    family: Literal[
+        "carry_only",
+        "news_driven",
+        "edge_based",
+        "mean_reversion",
+        "contrarian",
+        "momentum",
+        "volume_breakout",
+        "resolution_convergence",
+    ]
     kelly_fraction: float
     edge_threshold_bps: float
     max_position_notional: float
@@ -119,6 +137,34 @@ class StrategyConfig:
     carry_price_min: float = 0.95
     carry_price_max: float = 0.99
     min_confidence: float = 0.55
+    # Mean reversion: volume spike ratio to detect overreaction
+    volume_spike_ratio: float = 3.0
+    # Mean reversion: minimum move in bps to trigger
+    reversion_move_bps: float = 200.0
+    # Contrarian: extreme price threshold (buy NO when mid > this)
+    extreme_high: float = 0.93
+    # Contrarian: extreme price threshold (buy YES when mid < this)
+    extreme_low: float = 0.07
+    # Resolution convergence: max hours to resolution to activate
+    resolution_hours_max: float = 72.0
+    # Momentum: minimum consecutive direction snapshots (approximated via mid vs last_trade)
+    momentum_min_edge_bps: float = 50.0
+    # Carry exit: threshold below which mid triggers a sell
+    carry_exit_threshold: float = 0.05
+
+    def __post_init__(self) -> None:
+        if not (0.0 < self.kelly_fraction <= 1.0):
+            raise ValueError(f"kelly_fraction must be in (0, 1], got {self.kelly_fraction}")
+        if self.edge_threshold_bps < 0:
+            raise ValueError(f"edge_threshold_bps must be >= 0, got {self.edge_threshold_bps}")
+        if self.max_position_notional <= 0:
+            raise ValueError(f"max_position_notional must be > 0, got {self.max_position_notional}")
+        if self.carry_price_min >= self.carry_price_max:
+            raise ValueError(
+                f"carry_price_min ({self.carry_price_min}) must be < carry_price_max ({self.carry_price_max})"
+            )
+        if self.extreme_low >= self.extreme_high:
+            raise ValueError(f"extreme_low ({self.extreme_low}) must be < extreme_high ({self.extreme_high})")
 
 
 @dataclass(frozen=True)
@@ -134,6 +180,12 @@ class OrderIntent:
     edge_bps: float
     holding_period_minutes: int | None
     thesis: str
+
+    def __post_init__(self) -> None:
+        if not (0.001 <= self.limit_price <= 0.999):
+            raise ValueError(f"limit_price must be in [0.001, 0.999], got {self.limit_price}")
+        if self.requested_quantity <= 0:
+            raise ValueError(f"requested_quantity must be > 0, got {self.requested_quantity}")
 
 
 @dataclass(frozen=True)
@@ -159,6 +211,7 @@ class PositionState:
     quantity: float = 0.0
     avg_entry_price: float = 0.0
     total_opened_quantity: float = 0.0
+    total_opened_notional: float = 0.0
     opened_ts: datetime | None = None
     closed_ts: datetime | None = None
     entry_probability: float = 0.0

@@ -43,15 +43,17 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     market_id TEXT NOT NULL,
     ts TEXT NOT NULL,
     status TEXT NOT NULL,
-    best_bid REAL NOT NULL,
-    best_ask REAL NOT NULL,
+    best_bid REAL NOT NULL CHECK (best_bid >= 0 AND best_bid <= 1),
+    best_ask REAL NOT NULL CHECK (best_ask >= 0 AND best_ask <= 1),
     mid REAL NOT NULL,
     last_trade REAL NOT NULL,
-    volume_1m REAL NOT NULL,
-    volume_24h REAL NOT NULL,
+    volume_1m REAL NOT NULL CHECK (volume_1m >= 0),
+    volume_24h REAL NOT NULL CHECK (volume_24h >= 0),
     open_interest REAL NOT NULL,
     tick_size REAL NOT NULL,
+    is_synthetic INTEGER NOT NULL DEFAULT 0,
     features_json TEXT NOT NULL DEFAULT '{}',
+    CHECK (best_bid <= best_ask),
     FOREIGN KEY (market_id) REFERENCES markets (market_id)
 );
 

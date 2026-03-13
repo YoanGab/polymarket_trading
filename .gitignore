@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+dist/
+*.egg-info/
+catboost_info/
+.claude/scheduled_tasks.lock
+
+# Data files (large, reproduced via scripts)
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.json
+data/*.csv
+data/*.log
+*.sqlite
+demo_replay.sqlite
+
+# ML models (trained artifacts)
+models/*.pkl
+models/*.json
+
+# Experiment logs (append-only per run)
+results.tsv
+results_ml.tsv
+experiments.jsonl
+run.log
+eval.log

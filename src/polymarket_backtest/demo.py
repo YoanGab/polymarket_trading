@@ -59,7 +59,14 @@ def run_demo(path: Path) -> str:
     engine.run()
     persist_metric_results(conn, experiment_id, config.markout_horizons_min)
     summary = build_metrics_summary(conn, experiment_id, config.markout_horizons_min)
-    report = ReportGenerator().build_markdown(summary)
+    report = ReportGenerator().build_markdown(
+        summary,
+        {
+            "experiment_name": config.experiment_name,
+            "starting_cash": config.starting_cash,
+            "strategy_count": len(default_strategy_grid()),
+        },
+    )
     conn.close()
     return report
 

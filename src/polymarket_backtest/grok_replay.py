@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from . import db
-from .types import ForecastInput, ForecastOutput, MarketState, NewsItem, ensure_utc, isoformat
+import httpx
 
+from . import db
+from .types import ForecastInput, ForecastOutput, ensure_utc, isoformat
+
+logger = logging.getLogger(__name__)
 
 FORBIDDEN_XAI_TOOLS = {
     "web_search",
-    "x_search",
     "code_execution",
     "code_interpreter",
     "attachment_search",
@@ -42,21 +46,100 @@ def build_temporal_system_prompt(as_of: str) -> str:
     )
 
 
+def _require_env(var_name: str) -> str:
+    value = os.getenv(var_name)
+    if not value:
+        raise RuntimeError(f"{var_name} is not set")
+    return value
+
+
+def _extract_output_text(body: dict[str, Any]) -> str:
+    output_text = body.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    text_chunks: list[str] = []
+    for item in body.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                text_chunks.append(content.get("text", ""))
+    text = "".join(text_chunks).strip()
+    if not text:
+        raise ValueError("xAI response did not include output_text content")
+    return text
+
+
+def _parse_forecast_output(body: dict[str, Any], *, model_release: str) -> dict[str, Any]:
+    parsed = json.loads(_extract_output_text(body))
+    if not isinstance(parsed, dict):
+        raise ValueError("Forecast output must be a JSON object")
+    try:
+        probability = float(parsed.get("probability_yes", 0.5))
+        confidence = float(parsed.get("confidence", 0.5))
+        expected_edge_bps = float(parsed.get("expected_edge_bps", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Forecast output numeric fields must contain valid numbers") from exc
+    parsed["probability_yes"] = max(0.001, min(0.999, probability))
+    parsed["confidence"] = max(0.0, min(1.0, confidence))
+    parsed["expected_edge_bps"] = expected_edge_bps
+    evidence = parsed.get("evidence", [])
+    if evidence is None:
+        evidence = []
+    if not isinstance(evidence, list):
+        raise ValueError("Forecast output evidence must be a JSON array")
+    parsed["evidence"] = evidence
+    parsed["thesis"] = str(parsed.get("thesis", ""))
+    parsed["reasoning"] = str(parsed.get("reasoning", ""))
+    parsed.setdefault("agent_name", "grok_replay")
+    parsed.setdefault("model_id", "grok")
+    parsed.setdefault("model_release", model_release)
+    return parsed
+
+
+def _x_search_date_bounds(as_of: str, *, lookback_days: int) -> tuple[str, str]:
+    as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    to_date = as_of_dt.date()
+    from_date = to_date - timedelta(days=lookback_days)
+    return from_date.isoformat(), to_date.isoformat()
+
+
 class ForecastTransport(Protocol):
+    is_live_safe: bool
+
     def complete(
         self,
         *,
         model_release: str,
         system_prompt: str,
         context_bundle: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @dataclass
 class DeterministicReplayTransport:
+    """FAKE deterministic forecaster for backtesting only.
+
+    This transport does NOT call any real LLM or forecast API.  It applies
+    hard-coded heuristics to the market mid-price:
+
+    * +0.35 when news title/content contains "suspend"/"suspending"
+    * +0.02 when news title/content contains "no change"/"unchanged"
+
+    Because the rules are trivial, backtest results produced with this
+    transport are **meaningless for strategy selection**.  They only verify
+    that the replay pipeline executes end-to-end without errors.
+
+    For any production or strategy-evaluation decision you MUST use a real
+    Grok API transport (``XAIResponsesTransport`` or ``XAISearchTransport``)
+    by setting ``FORECAST_MODE=xai`` or ``FORECAST_MODE=xai_search`` and
+    providing a valid ``XAI_API_KEY``.
+    """
+
     agent_name: str = "grok_replay"
     model_id: str = "grok"
+    is_live_safe: bool = False
 
     def complete(
         self,
@@ -114,8 +197,16 @@ class DeterministicReplayTransport:
 
 @dataclass
 class XAIResponsesTransport:
+    """Live transport that calls the xAI Responses API.
+
+    Users must set the correct model ID for their xAI API access via
+    the ``GROK_MODEL_RELEASE`` environment variable or the ``model_release``
+    parameter passed to ``ReplayGrokClient``.
+    """
+
     api_key_env: str = "XAI_API_KEY"
     api_url: str = "https://api.x.ai/v1/responses"
+    is_live_safe: bool = True
 
     def complete(
         self,
@@ -149,16 +240,225 @@ class XAIResponsesTransport:
         )
         with urllib.request.urlopen(request, timeout=30) as response:
             body = json.loads(response.read().decode("utf-8"))
-        text_chunks: list[str] = []
-        for item in body.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") == "output_text":
-                    text_chunks.append(content.get("text", ""))
-        parsed = json.loads("".join(text_chunks))
-        parsed.setdefault("agent_name", "grok_replay")
-        parsed.setdefault("model_id", "grok")
-        parsed.setdefault("model_release", model_release)
-        return parsed
+        return _parse_forecast_output(body, model_release=model_release)
+
+
+@dataclass
+class XAISearchTransport:
+    """Live transport that calls the xAI Responses API with x_search tool.
+
+    Users must set the correct model ID for their xAI API access via
+    the ``GROK_MODEL_RELEASE`` environment variable or the ``model_release``
+    parameter passed to ``ReplayGrokClient``.
+    """
+
+    api_key_env: str = "XAI_API_KEY"
+    api_url: str = "https://api.x.ai/v1/responses"
+    search_window_days: int = 30
+    timeout_seconds: float = 30.0
+    is_live_safe: bool = True
+
+    def complete(
+        self,
+        *,
+        model_release: str,
+        system_prompt: str,
+        context_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        api_key = _require_env(self.api_key_env)
+        from_date, to_date = _x_search_date_bounds(
+            str(context_bundle["as_of"]),
+            lookback_days=self.search_window_days,
+        )
+        payload = {
+            "model": model_release,
+            "temperature": 0,
+            "store": False,
+            "input": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(context_bundle, sort_keys=True)},
+            ],
+            "tools": [
+                {
+                    "type": "x_search",
+                    "x_search": {
+                        "from_date": from_date,
+                        "to_date": to_date,
+                    },
+                }
+            ],
+        }
+        if any(tool.get("type") in FORBIDDEN_XAI_TOOLS for tool in payload["tools"]):
+            raise ValueError("Built-in xAI tools are forbidden in replay mode")
+
+        with httpx.Client(timeout=self.timeout_seconds) as client:
+            response = client.post(
+                self.api_url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+
+        system_fingerprint = body.get("system_fingerprint")
+        if system_fingerprint:
+            logger.info(
+                "xAI replay search fingerprint=%s model_release=%s from_date=%s to_date=%s",
+                system_fingerprint,
+                model_release,
+                from_date,
+                to_date,
+            )
+        return _parse_forecast_output(body, model_release=model_release)
+
+
+@dataclass
+class SmartRuleTransport:
+    """Rule-based forecaster that uses price level, trend, and resolution proximity.
+
+    NOT a real forecaster — but much smarter than DeterministicReplayTransport.
+    Uses actual market signals to generate plausible probability estimates:
+
+    1. Price level: extreme prices (>0.90 or <0.10) are reinforced
+    2. Price trend: compares mid vs last_trade for directional signal
+    3. Resolution proximity: closer to resolution = more confidence in extremes
+    4. Volume: higher volume = more confidence in current price
+
+    Still NOT safe for live trading — use real xAI transport for that.
+    """
+
+    agent_name: str = "smart_rules"
+    model_id: str = "smart_rules"
+    is_live_safe: bool = False
+
+    def complete(
+        self,
+        *,
+        model_release: str,
+        system_prompt: str,
+        context_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        market = context_bundle["market"]
+        mid = float(market["mid"])
+        best_ask = float(market["best_ask"])
+        best_bid = float(market["best_bid"])
+        last_trade = float(market["last_trade"])
+        volume_24h = float(market.get("volume_24h", 0.0))
+
+        # --- Signal 1: Price level (extreme prices tend to resolve in that direction) ---
+        # Markets at 0.92+ usually resolve YES; markets at 0.08- usually resolve NO
+        if mid >= 0.92:
+            level_signal = 0.03 + (mid - 0.92) * 0.5  # stronger as it gets closer to 1
+        elif mid <= 0.08:
+            level_signal = -0.03 - (0.08 - mid) * 0.5
+        elif mid >= 0.75:
+            level_signal = 0.015
+        elif mid <= 0.25:
+            level_signal = -0.015
+        else:
+            level_signal = 0.0
+
+        # --- Signal 2: Price trend (mid vs last_trade) ---
+        trend = mid - last_trade
+        # Dampen trend signal to avoid chasing noise
+        trend_signal = max(-0.03, min(0.03, trend * 0.5))
+
+        # --- Signal 3: Resolution proximity ---
+        resolution_ts_str = market.get("resolution_ts")
+        proximity_boost = 1.0
+        if resolution_ts_str:
+            try:
+                as_of_str = context_bundle.get("as_of", "")
+                if as_of_str:
+                    as_of_dt = datetime.fromisoformat(str(as_of_str).replace("Z", "+00:00"))
+                    res_dt = datetime.fromisoformat(str(resolution_ts_str).replace("Z", "+00:00"))
+                    hours_to_res = max(0, (res_dt - as_of_dt).total_seconds() / 3600)
+                    if hours_to_res < 72:
+                        # Near resolution: amplify the level signal
+                        proximity_boost = 1.0 + max(0, (72 - hours_to_res) / 72) * 0.5
+            except (ValueError, TypeError):
+                pass
+
+        # --- Signal 4: Volume confidence ---
+        # Higher volume = more confidence in current price
+        if volume_24h > 50_000:
+            volume_confidence = 0.75
+        elif volume_24h > 10_000:
+            volume_confidence = 0.65
+        elif volume_24h > 1_000:
+            volume_confidence = 0.58
+        else:
+            volume_confidence = 0.52
+
+        # --- Combine signals ---
+        adjustment = level_signal * proximity_boost + trend_signal
+        probability = mid + adjustment
+        probability = min(0.995, max(0.005, round(probability, 4)))
+
+        confidence = min(0.95, max(0.10, volume_confidence + abs(level_signal) * 2))
+
+        edge_bps = round((probability - best_ask) * 10_000.0, 2)
+        if probability < best_bid:
+            thesis = "Sell YES / price likely to fall"
+        elif edge_bps > 0:
+            thesis = "Buy YES"
+        else:
+            thesis = "No trade"
+
+        return {
+            "agent_name": self.agent_name,
+            "model_id": self.model_id,
+            "model_release": model_release,
+            "probability_yes": probability,
+            "confidence": confidence,
+            "expected_edge_bps": edge_bps,
+            "thesis": thesis,
+            "reasoning": (
+                f"Rule-based: level_signal={level_signal:+.4f} "
+                f"trend_signal={trend_signal:+.4f} "
+                f"proximity_boost={proximity_boost:.2f}"
+            ),
+            "evidence": [],
+        }
+
+
+def create_transport(*, mode: str, model_release: str) -> ForecastTransport:
+    """Factory that selects a forecast transport based on *mode*.
+
+    Args:
+        mode: One of ``"deterministic"``, ``"xai"``, or ``"xai_search"``.
+        model_release: The xAI model release identifier (e.g. ``"grok-3"``).
+            Ignored for deterministic mode but validated for live transports.
+    """
+    if mode == "deterministic":
+        return DeterministicReplayTransport()
+    if mode == "smart_rules":
+        return SmartRuleTransport()
+    if mode == "ml_model":
+        from .ml_transport import MLModelTransport
+
+        return MLModelTransport()
+    if mode in {"xai", "xai_no_search"}:
+        _require_env("XAI_API_KEY")
+        return XAIResponsesTransport()
+    if mode == "xai_search":
+        _require_env("XAI_API_KEY")
+        return XAISearchTransport()
+    raise ValueError(
+        f"Unknown transport mode {mode!r} for model_release={model_release!r}; "
+        "expected one of: deterministic, xai, xai_search"
+    )
+
+
+def validate_transport_for_live(transport: ForecastTransport) -> None:
+    """Raise if transport is not safe for live trading."""
+    if not transport.is_live_safe:
+        raise RuntimeError(
+            "Cannot use DeterministicReplayTransport for live trading. Set FORECAST_MODE=xai and provide XAI_API_KEY."
+        )
 
 
 @dataclass
@@ -251,7 +551,7 @@ class ReplayGrokClient:
                 "tick_size": market.tick_size,
                 "rules_text": market.rules_text,
                 "additional_context": market.additional_context,
-                "resolution_ts": isoformat(market.resolution_ts) if market.resolution_ts else None,
+                "resolution_ts": isoformat(res_ts) if (res_ts := market.resolution_ts) is not None else None,
             },
             "recent_news": [
                 {

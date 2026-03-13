@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -11,21 +11,23 @@ from typing import Any
 from .types import MarketState, NewsItem, OrderLevel, ensure_utc, isoformat
 
 
-UTC = timezone.utc
-
-
 def connect(path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
     schema = resources.files("polymarket_backtest").joinpath("schema.sql").read_text()
     conn.executescript(schema)
+    # Migration: add is_synthetic column if missing (for databases created before this change)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)").fetchall()}
+    if "is_synthetic" not in columns:
+        conn.execute("ALTER TABLE market_snapshots ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -35,6 +37,18 @@ def _json(value: Any) -> str:
 
 def _hash(payload: Any) -> str:
     return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
+
+
+def _coerce_iso8601(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return isoformat(value)
+    return value
+
+
+def _inserted_count(conn: sqlite3.Connection, total_changes_before: int) -> int:
+    return conn.total_changes - total_changes_before
 
 
 def create_experiment(
@@ -55,7 +69,10 @@ def create_experiment(
         (name, model_id, model_release, system_prompt_hash, _json(config)),
     )
     conn.commit()
-    return int(cursor.lastrowid)
+    row_id = cursor.lastrowid
+    if row_id is None:
+        raise RuntimeError("INSERT did not return a lastrowid")
+    return int(row_id)
 
 
 def add_market(
@@ -99,6 +116,40 @@ def add_market(
     )
 
 
+def bulk_add_markets(conn: sqlite3.Connection, markets: list[dict[str, Any]]) -> int:
+    rows = [
+        (
+            market["market_id"],
+            market["title"],
+            market["domain"],
+            market["market_type"],
+            _coerce_iso8601(market["open_ts"]),
+            _coerce_iso8601(market.get("close_ts")),
+            _coerce_iso8601(market.get("resolution_ts")),
+            market["status"],
+            int(bool(market.get("fees_enabled", False))),
+            market.get("fee_rate", 0.0),
+            market.get("fee_exponent", 0.0),
+            market.get("maker_rebate_rate", 0.0),
+        )
+        for market in markets
+    ]
+    total_changes_before = conn.total_changes
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO markets (
+            market_id, title, domain, market_type, open_ts, close_ts,
+            resolution_ts, status, fees_enabled, fee_rate, fee_exponent,
+            maker_rebate_rate
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    inserted_count = _inserted_count(conn, total_changes_before)
+    conn.commit()
+    return inserted_count
+
+
 def add_rule_revision(
     conn: sqlite3.Connection,
     *,
@@ -122,6 +173,30 @@ def add_rule_revision(
             bulletin_ref,
         ),
     )
+
+
+def bulk_add_rule_revisions(conn: sqlite3.Connection, revisions: list[dict[str, Any]]) -> int:
+    rows = [
+        (
+            revision["market_id"],
+            _coerce_iso8601(revision["effective_ts"]),
+            revision["rules_text"],
+            revision["additional_context"],
+        )
+        for revision in revisions
+    ]
+    total_changes_before = conn.total_changes
+    conn.executemany(
+        """
+        INSERT INTO market_rule_revisions (
+            market_id, effective_ts, rules_text, additional_context
+        ) VALUES (?, ?, ?, ?)
+        """,
+        rows,
+    )
+    inserted_count = _inserted_count(conn, total_changes_before)
+    conn.commit()
+    return inserted_count
 
 
 def add_snapshot(
@@ -162,6 +237,8 @@ def add_snapshot(
             "{}",
         ),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("INSERT did not return a lastrowid")
     snapshot_id = int(cursor.lastrowid)
     conn.executemany(
         """
@@ -171,6 +248,41 @@ def add_snapshot(
         """,
         [(snapshot_id, side, level_no, price, quantity) for side, level_no, price, quantity in orderbook],
     )
+
+
+def bulk_add_snapshots(conn: sqlite3.Connection, snapshots: list[dict[str, Any]]) -> int:
+    rows = [
+        (
+            snapshot["market_id"],
+            _coerce_iso8601(snapshot["ts"]),
+            snapshot["status"],
+            snapshot["best_bid"],
+            snapshot["best_ask"],
+            (snapshot["best_bid"] + snapshot["best_ask"]) / 2.0,
+            snapshot["last_trade"],
+            snapshot["volume_1m"],
+            snapshot["volume_24h"],
+            snapshot["open_interest"],
+            snapshot["tick_size"],
+            int(snapshot.get("interpolated", False) or snapshot.get("forward_filled", False)),
+            "{}",
+        )
+        for snapshot in snapshots
+    ]
+    total_changes_before = conn.total_changes
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO market_snapshots (
+            market_id, ts, status, best_bid, best_ask, mid, last_trade,
+            volume_1m, volume_24h, open_interest, tick_size, is_synthetic,
+            features_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    inserted_count = _inserted_count(conn, total_changes_before)
+    conn.commit()
+    return inserted_count
 
 
 def add_news(
@@ -243,6 +355,30 @@ def add_resolution(
             resolution_note,
         ),
     )
+
+
+def bulk_add_resolutions(conn: sqlite3.Connection, resolutions: list[dict[str, Any]]) -> int:
+    rows = [
+        (
+            resolution["market_id"],
+            _coerce_iso8601(resolution["resolution_ts"]),
+            resolution["resolved_outcome"],
+            resolution["status"],
+        )
+        for resolution in resolutions
+    ]
+    total_changes_before = conn.total_changes
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO market_resolutions (
+            market_id, resolution_ts, resolved_outcome, status
+        ) VALUES (?, ?, ?, ?)
+        """,
+        rows,
+    )
+    inserted_count = _inserted_count(conn, total_changes_before)
+    conn.commit()
+    return inserted_count
 
 
 def get_market_ids(conn: sqlite3.Connection) -> list[str]:
@@ -348,7 +484,7 @@ def get_market_state_as_of(
         maker_rebate_rate=float(row["maker_rebate_rate"]),
         orderbook=[
             OrderLevel(
-                side=str(level["side"]),
+                side="bid" if str(level["side"]) == "bid" else "ask",
                 level_no=int(level["level_no"]),
                 price=float(level["price"]),
                 quantity=float(level["quantity"]),
@@ -519,6 +655,11 @@ def record_audit(
 
 
 def seed_demo_data(conn: sqlite3.Connection) -> None:
+    # Guard: refuse to seed demo data if real market data already exists
+    existing = conn.execute("SELECT COUNT(*) FROM markets WHERE market_id NOT LIKE 'pm_%'").fetchone()[0]
+    if existing > 0:
+        raise RuntimeError("Cannot seed demo data: database contains real market data")
+
     base = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 
     add_market(
