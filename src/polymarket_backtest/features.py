@@ -225,13 +225,15 @@ class WalkForwardSplit:
 
 def walk_forward_split(
     dataset: FeatureSet,
-    train_frac: float = 0.60,
-    val_frac: float = 0.20,
+    train_cutoff: str = "2025-10-01",
+    val_cutoff: str = "2026-01-01",
 ) -> WalkForwardSplit:
     """Split dataset chronologically by market resolution time.
 
-    Markets are sorted by their latest snapshot timestamp (proxy for resolution time).
-    First 60% for training, next 20% for validation, last 20% for test.
+    Fixed date cutoffs (not percentage-based) for reproducibility:
+    - Train: markets resolved before train_cutoff (≤ Q3 2025) — ~63K markets
+    - Validation: markets resolved between train_cutoff and val_cutoff (Q4 2025) — ~44K markets
+    - Test: markets resolved after val_cutoff (2026+) — ~74K markets
     No data leakage — test markets resolved after all training markets.
     """
     # Group by market_id, find last timestamp per market
@@ -240,16 +242,17 @@ def walk_forward_split(
         if mid not in market_last_ts or ts > market_last_ts[mid]:
             market_last_ts[mid] = ts
 
-    # Sort markets by last timestamp
-    sorted_markets = sorted(market_last_ts.keys(), key=lambda m: market_last_ts[m])
-
-    n_markets = len(sorted_markets)
-    train_end = int(n_markets * train_frac)
-    val_end = int(n_markets * (train_frac + val_frac))
-
-    train_set = set(sorted_markets[:train_end])
-    val_set = set(sorted_markets[train_end:val_end])
-    test_set = set(sorted_markets[val_end:])
+    # Split by fixed date cutoffs
+    train_set: set[str] = set()
+    val_set: set[str] = set()
+    test_set: set[str] = set()
+    for mid, ts in market_last_ts.items():
+        if ts < train_cutoff:
+            train_set.add(mid)
+        elif ts < val_cutoff:
+            val_set.add(mid)
+        else:
+            test_set.add(mid)
 
     # Build index masks
     train_mask = [mid in train_set for mid in dataset.market_ids]

@@ -156,9 +156,12 @@ LOOP FOREVER:
 
 ## Validation Rules (no data leakage)
 
-- **Walk-forward split**: Train on early markets, validate on middle, test on latest (chronological by resolution time)
-- **Never peek at test set during development** — only evaluate test at the end
-- **Use validation set for all tuning decisions**
+- **Chronological split by resolution date**:
+  - **Train**: markets resolved ≤ Q3 2025 (Sep 30, 2025) — ~63K markets (35%)
+  - **Validation**: markets resolved Q4 2025 (Oct-Dec 2025) — ~44K markets (24%)
+  - **Test**: markets resolved 2026+ (Jan 2026 onward) — ~74K markets (41%)
+- **Never peek at test set during development** — only evaluate test at the final review
+- **Use validation set for all tuning decisions** (model selection, hyperparameters, strategy thresholds)
 - **Markets in train/val/test must not overlap**
 - **No future data in features** — features at time T can only use data up to time T
 
