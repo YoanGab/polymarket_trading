@@ -366,7 +366,16 @@ def train_xgboost(
         early_stopping_rounds=50,
         verbose_eval=False,
     )
-    return {"xgb_model": model, "scaler": scaler}
+
+    # Isotonic calibration on validation set
+    from sklearn.isotonic import IsotonicRegression
+
+    raw_val_preds = model.predict(dval)
+    calibrator = IsotonicRegression(y_min=0.001, y_max=0.999, out_of_bounds="clip")
+    calibrator.fit(raw_val_preds, val_y)
+    print(f"  XGBoost: applied isotonic calibration on {len(val_y)} val samples")
+
+    return {"xgb_model": model, "scaler": scaler, "calibrator": calibrator}
 
 
 def train_catboost(
@@ -974,6 +983,8 @@ def predict(model: object, X: np.ndarray) -> np.ndarray:
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
         raw = model["xgb_model"].predict(dmat)
+        if "calibrator" in model:
+            raw = model["calibrator"].transform(raw)
         return np.clip(raw, 0.001, 0.999)
     if isinstance(model, dict) and "catboost" in model:
         raw = model["catboost"].predict_proba(X)[:, 1]
