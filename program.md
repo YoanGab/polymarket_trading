@@ -164,26 +164,60 @@ LOOP FOREVER:
 
 ## Ideas to explore
 
-Rough priority order. Cross off as you try them.
+Rough priority order. Cross off as you try them. Start with quick wins, escalate to complex models.
 
-**Model improvements:**
-- [ ] Feature engineering: price velocity, acceleration, time-to-resolution features
-- [ ] Feature engineering: event tags as categorical features (from event_tags table)
-- [ ] LightGBM / XGBoost (181K markets should be enough data now)
-- [ ] Neural nets (simple MLP, then more complex)
-- [ ] Ensemble: blend logistic + tree model
-- [ ] Calibration: Platt scaling, isotonic regression
-- [ ] Feature selection: drop low-importance features
+### Phase 1: Feature engineering & classic ML
+- [ ] Price velocity, acceleration, volatility features
+- [ ] Time-to-resolution features (hours remaining, % of lifetime elapsed)
+- [ ] Event tags as categorical features (JOIN event_tags table)
+- [ ] Volume features: total volume, volume rank
+- [ ] Market age features: days since open, days active
+- [ ] LightGBM (handles categoricals natively, fast to train)
+- [ ] XGBoost (strong baseline, GPU-acceleratable)
+- [ ] CatBoost (native categorical support — perfect for event tags)
+- [ ] Feature selection: drop low-importance features, SHAP analysis
+- [ ] Calibration: Platt scaling, isotonic regression, temperature scaling
 
-**Strategy improvements:**
-- [ ] Kelly criterion sizing with calibrated probabilities
-- [ ] Contrarian: buy when price < model prob, sell when price > model prob
-- [ ] Hold-to-resolution vs. exit-on-target
+### Phase 2: Deep learning & sequence models
+- [ ] MLP on tabular features (simple feedforward, start small)
+- [ ] TabNet (attention-based deep learning for tabular data)
+- [ ] LSTM / GRU on price time series (learn temporal patterns)
+- [ ] Transformer on price sequences (self-attention over snapshots)
+- [ ] 1D-CNN on price history (learn local patterns)
+- [ ] Temporal Fusion Transformer (TFT — state of the art for time series)
+- [ ] NLP embeddings: encode market titles with sentence-transformers → numeric features
+- [ ] Cross-market features: correlation between markets in the same event
+
+### Phase 3: Ensemble & meta-learning
+- [ ] Ensemble: blend logistic + LightGBM + neural net (weighted average)
+- [ ] Stacking: use model predictions as features for a meta-learner
+- [ ] Per-category specialists: train separate models for sports/politics/crypto
+- [ ] Online learning: update model weights as new data arrives
+- [ ] Bayesian model averaging across ensemble members
+
+### Phase 4: RL & advanced strategies
+- [ ] RL agent (PPO/DQN): learn entry/exit timing from price trajectories
+- [ ] Multi-armed bandit: dynamically allocate capital across strategies
+- [ ] Kelly criterion with calibrated probabilities
+- [ ] Contrarian: buy when price diverges from model probability
+- [ ] Hold-to-resolution vs. dynamic exit (trailing stop, target profit)
 - [ ] Category-specific strategies (sports vs politics vs crypto behave differently)
-- [ ] Spread-aware entry: only enter when edge > spread
-- [ ] Portfolio-level risk: max position sizing, diversification
+- [ ] Spread-aware entry: only enter when expected edge > spread cost
+- [ ] Portfolio-level risk: max exposure per market, sector diversification
+- [ ] Regime detection: identify trending vs mean-reverting markets
 
-**Infrastructure:**
-- [ ] Faster eval: sample markets instead of running all
+### Phase 5: Market microstructure & alpha
+- [ ] Bid-ask spread dynamics as features (wide spread = uncertainty)
+- [ ] Price impact estimation from historical spread patterns
+- [ ] Event-driven features: markets that resolve near same date cluster
+- [ ] Contrarian signal: extreme prices (>0.95 or <0.05) tend to mean-revert
+- [ ] Momentum signal: trending markets continue trending
+- [ ] Sentiment proxy: rapid price moves = new information arriving
+
+### Infrastructure
+- [ ] Faster eval: sample markets instead of running all 181K
 - [ ] Feature importance analysis after each model change
-- [ ] Overfit detection: compare train vs val Brier
+- [ ] Overfit detection: compare train vs val Brier, early stopping
+- [ ] Hyperparameter search with Optuna (Bayesian optimization)
+- [ ] GPU training for neural nets (torch, check CUDA/MPS availability)
+- [ ] Parallel model training: train multiple architectures concurrently
