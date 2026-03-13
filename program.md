@@ -152,6 +152,8 @@ LOOP FOREVER:
 
 **Crashes**: If a run crashes (OOM, bug, etc.), use your judgment: if it's something dumb and easy to fix (typo, missing import), fix and re-run. If the idea itself is fundamentally broken, log "crash" and move on.
 
+**Re-read program.md every 5 experiments**: The human may update `program.md` at any time with new objectives, constraints, or priorities. Every 5 experiments, re-read `program.md` from disk to pick up any changes. If the goals or priorities have changed, adapt immediately.
+
 **Check trades**: After strategy eval, always verify TRADES > 0. A strategy with 0 trades is meaningless — the eval tells you nothing.
 
 **NEVER STOP**: Once the experiment loop has begun, do NOT pause to ask the human if you should continue. The human might be asleep and expects you to continue working *indefinitely* until manually stopped. You are autonomous. If you run out of ideas, think harder — re-read the in-scope files for new angles, try combining previous near-misses, try more radical changes, analyze what features drive predictions, try different model architectures. The loop runs until the human interrupts you, period.
