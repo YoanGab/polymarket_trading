@@ -349,7 +349,7 @@ def train_xgboost(
         "objective": "binary:logistic",
         "eval_metric": "logloss",
         "eta": 0.02,
-        "max_depth": 3,
+        "max_depth": 4,
         "min_child_weight": 100,
         "subsample": 0.6,
         "colsample_bytree": 0.5,
