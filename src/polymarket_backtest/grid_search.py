@@ -111,6 +111,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
+        # Core medium: mid-range at 40-day horizon
+        StrategyConfig(
+            name="core_medium",
+            family="resolution_convergence",
+            kelly_fraction=0.90,
+            edge_threshold_bps=50.0,
+            max_position_notional=3000.0,
+            max_holding_minutes=None,
+            resolution_hours_max=960.0,
+            min_confidence=0.65,
+            extreme_low=0.30,
+            extreme_high=0.70,
+            **shared,
+        ),
         # Core extended: mid-range trades with longer horizon
         StrategyConfig(
             name="core_longterm",
