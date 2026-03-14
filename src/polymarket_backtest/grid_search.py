@@ -125,6 +125,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
+        # Core ultra-long: mid-range at 90-day horizon
+        StrategyConfig(
+            name="core_ultralong",
+            family="resolution_convergence",
+            kelly_fraction=0.60,
+            edge_threshold_bps=200.0,
+            max_position_notional=2000.0,
+            max_holding_minutes=None,
+            resolution_hours_max=2160.0,
+            min_confidence=0.65,
+            extreme_low=0.30,
+            extreme_high=0.70,
+            **shared,
+        ),
     ]
 
 
