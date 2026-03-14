@@ -443,6 +443,21 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.12,
         ),
+        # Conviction core: high confidence in the safe mid-range
+        StrategyConfig(
+            name="conviction_core",
+            family="resolution_convergence",
+            kelly_fraction=1.00,
+            edge_threshold_bps=50.0,
+            max_position_notional=3500.0,
+            max_holding_minutes=None,
+            resolution_hours_max=720.0,
+            min_confidence=0.75,
+            extreme_low=0.30,
+            extreme_high=0.70,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.12,
+        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
