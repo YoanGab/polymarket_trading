@@ -69,20 +69,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
-        # Ultra-nearterm: resolving in ≤48h, very low edge, aggressive sizing
-        StrategyConfig(
-            name="resolution_imminent",
-            family="resolution_convergence",
-            kelly_fraction=0.50,
-            edge_threshold_bps=50.0,
-            max_position_notional=2000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=48.0,
-            min_confidence=0.65,
-            extreme_low=0.20,
-            extreme_high=0.80,
-            **shared,
-        ),
     ]
 
 
