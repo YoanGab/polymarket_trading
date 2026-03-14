@@ -563,12 +563,6 @@ class StrategyEngine:
             return []
 
         ask_price = normalized_ask_price(market.best_ask)
-
-        # Skip illiquid markets with wide spreads
-        spread = market.best_ask - market.best_bid
-        if spread > 0.10:
-            return []
-
         edge_bps = (forecast.probability_yes - ask_price) * 10_000.0
         fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
         net_edge_bps = edge_bps - fee_bps
