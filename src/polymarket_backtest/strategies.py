@@ -575,7 +575,7 @@ class StrategyEngine:
         if mid_distance < 0.5:
             mid_factor = 1.0
         else:
-            mid_factor = max(0.05, (2.0 * (1.0 - mid_distance)) ** 2)
+            mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         notional = min(
             config.max_position_notional,
