@@ -1,4 +1,5 @@
 import logging
+import math
 from dataclasses import dataclass
 
 from .types import (
@@ -578,9 +579,10 @@ class StrategyEngine:
             mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         confidence_factor = min(3.0, max(0.5, (forecast.confidence - 0.55) * 10.0))
+        time_boost = min(2.0, 1.0 + math.log2(max(1.0, config.resolution_hours_max / hours_to_res)) * 0.3)
         notional = min(
             config.max_position_notional,
-            available_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
+            available_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor * time_boost,
         )
         if notional <= 0:
             return []
