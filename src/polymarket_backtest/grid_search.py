@@ -468,19 +468,31 @@ def _stratified_market_sample(
     *,
     min_snapshots: int = 20,
     seed: int = 42,
+    split: str | None = None,
 ) -> list[str]:
-    """Sample markets with stratified random selection by resolution period.
+    """Sample markets with stratified random selection by duration bucket.
 
-    Buckets markets by how long they lasted (short/medium/long/very_long),
-    then samples proportionally from each bucket. This avoids the bias of
-    selecting only the longest-running markets.
+    Args:
+        split: If set, restrict to markets in this chronological split:
+            "train" (resolved < 2025-10-01), "val" (Oct-Dec 2025),
+            "test" (resolved >= 2026-01-01), or None (all markets).
     """
+    split_filter = ""
+    if split == "train":
+        split_filter = "AND m.resolution_ts < '2025-10-01'"
+    elif split == "val":
+        split_filter = "AND m.resolution_ts >= '2025-10-01' AND m.resolution_ts < '2026-01-01'"
+    elif split == "test":
+        split_filter = "AND m.resolution_ts >= '2026-01-01'"
+
     rows = conn.execute(
-        """
+        f"""
         SELECT ms.market_id, COUNT(*) as cnt,
                MIN(ms.ts) as first_ts, MAX(ms.ts) as last_ts
         FROM market_snapshots ms
         JOIN market_resolutions mr ON mr.market_id = ms.market_id
+        JOIN markets m ON m.market_id = ms.market_id
+        {("WHERE 1=1 " + split_filter) if split_filter else ""}
         GROUP BY ms.market_id
         HAVING cnt >= ?
         """,
@@ -573,6 +585,7 @@ def run_grid_search(
     max_markets: int | None = None,
     in_memory: bool = True,
     exclude_categories: list[str] | None = None,
+    split: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run a grid search across strategies.
 
@@ -596,7 +609,7 @@ def run_grid_search(
         # Determine which market IDs to replay (stratified random sampling)
         market_ids: list[str] | None = None
         if max_markets is not None:
-            market_ids = _stratified_market_sample(conn, max_markets)
+            market_ids = _stratified_market_sample(conn, max_markets, split=split)
             if not market_ids:
                 raise ValueError(f"No market data found in {db_path}")
 

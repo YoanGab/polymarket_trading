@@ -61,7 +61,13 @@ def main() -> None:
         "--no-in-memory",
         action="store_true",
         default=False,
-        help="Disable in-memory DB copy (required for large DBs like v2 at 20GB)",
+        help="Disable in-memory DB copy (use for very large DBs)",
+    )
+    parser.add_argument(
+        "--split",
+        choices=["train", "val", "test"],
+        default="val",
+        help="Chronological split to evaluate on (default: val). Use 'val' for tuning, 'test' for final eval only.",
     )
     args = parser.parse_args()
 
@@ -78,6 +84,7 @@ def main() -> None:
         transport_factory=transport_factory,
         exclude_categories=args.exclude_category,
         in_memory=not args.no_in_memory,
+        split=args.split,
     )
     ranked = rank_strategies(results)
     elapsed = time.monotonic() - start
