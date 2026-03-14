@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from polymarket_backtest import db
@@ -11,6 +12,7 @@ from polymarket_backtest.grid_search import expanded_strategy_grid
 from polymarket_backtest.grok_replay import _parse_forecast_output
 from polymarket_backtest.market_simulator import MarketSimulator
 from polymarket_backtest.metaculus_validator import BASE_URL, _validate_next_url
+from polymarket_backtest.ml_transport import MLModelTransport
 from polymarket_backtest.replay_engine import ReplayEngine
 from polymarket_backtest.snapshot_builder import _interpolate_snapshot
 from polymarket_backtest.types import (
@@ -148,6 +150,84 @@ def test_parse_forecast_output_clamps_probability_and_confidence() -> None:
 def test_parse_forecast_output_rejects_non_object_json() -> None:
     with pytest.raises(ValueError, match="JSON object"):
         _parse_forecast_output({"output_text": '["not-an-object"]'}, model_release="test-release")
+
+
+def test_ml_transport_uses_bundle_as_of_for_resolution_features() -> None:
+    transport = object.__new__(MLModelTransport)
+    transport.agent_name = "ml_model"
+    transport.model_id = "lightgbm"
+    transport._feature_names = ["hours_to_resolution"]
+    captured: dict[str, float] = {}
+
+    def _capture_predict(X: np.ndarray) -> np.ndarray:
+        captured["hours_to_resolution"] = float(X[0, 0])
+        return np.array([0.62], dtype=np.float32)
+
+    transport._predict = _capture_predict
+
+    MLModelTransport.complete(
+        transport,
+        model_release="test-release",
+        system_prompt="",
+        context_bundle={
+            "as_of": "2026-01-01T12:00:00+00:00",
+            "market": {
+                "market_id": "market-1",
+                "best_bid": 0.49,
+                "best_ask": 0.51,
+                "mid": 0.50,
+                "last_trade": 0.50,
+                "volume_1m": 100.0,
+                "volume_24h": 1_000.0,
+                "open_interest": 500.0,
+                "resolution_ts": "2026-01-03T12:00:00+00:00",
+            },
+        },
+    )
+
+    assert captured["hours_to_resolution"] == pytest.approx(48.0)
+
+
+def test_ml_transport_confidence_uses_tradable_edge() -> None:
+    transport = object.__new__(MLModelTransport)
+    transport.agent_name = "ml_model"
+    transport.model_id = "lightgbm"
+    transport._feature_names = []
+    transport._predict = lambda X: np.array([0.55], dtype=np.float32)
+
+    no_edge = MLModelTransport.complete(
+        transport,
+        model_release="test-release",
+        system_prompt="",
+        context_bundle={
+            "as_of": "2026-01-01T12:00:00+00:00",
+            "market": {
+                "market_id": "market-1",
+                "best_bid": 0.54,
+                "best_ask": 0.56,
+                "mid": 0.55,
+                "resolution_ts": None,
+            },
+        },
+    )
+    positive_edge = MLModelTransport.complete(
+        transport,
+        model_release="test-release",
+        system_prompt="",
+        context_bundle={
+            "as_of": "2026-01-01T12:00:00+00:00",
+            "market": {
+                "market_id": "market-1",
+                "best_bid": 0.53,
+                "best_ask": 0.54,
+                "mid": 0.535,
+                "resolution_ts": None,
+            },
+        },
+    )
+
+    assert no_edge["confidence"] == pytest.approx(0.5)
+    assert positive_edge["confidence"] == pytest.approx(0.6)
 
 
 def test_passive_fill_uses_delayed_fill_timestamp() -> None:

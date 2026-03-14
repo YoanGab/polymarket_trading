@@ -323,9 +323,12 @@ class ReplayEngine:
             return market
 
         tick_size = max(market.tick_size, 0.001)
-        # Conservative synthetic liquidity: use 10% of 1m volume (capped at 50)
-        # to avoid overstating available depth on empty books.
-        synthetic_quantity = min(50.0, max(1.0, market.volume_1m * 0.1))
+        # Synthetic liquidity: derive per-minute volume from volume_1m when
+        # available, otherwise approximate from volume_24h (total daily volume
+        # divided by 1440 minutes).  Scale conservatively at 1% of per-minute
+        # volume so a $1M/day market gets ~7 contracts (capped at 50).
+        per_minute_volume = market.volume_1m if market.volume_1m > 0 else market.volume_24h / 1440.0
+        synthetic_quantity = min(50.0, max(1.0, per_minute_volume * 0.01))
         bid_price = market.best_bid if 0.0 < market.best_bid < 1.0 else max(0.001, market.mid - tick_size / 2.0)
         ask_price = market.best_ask if 0.0 < market.best_ask < 1.0 else min(0.999, market.mid + tick_size / 2.0)
         bid_price = round(max(0.001, min(0.999 - tick_size, bid_price)), 4)
@@ -353,9 +356,12 @@ class ReplayEngine:
             isoformat(market.ts),
         )
         normalized_market = self._ensure_orderbook(market, reason="degraded_next_market")
+        effective_1m = (
+            normalized_market.volume_1m if normalized_market.volume_1m > 0 else normalized_market.volume_24h / 1440.0
+        )
         return dc_replace(
             normalized_market,
-            volume_1m=max(normalized_market.volume_1m * 0.25, order.requested_quantity * 3.0, 1.0),
+            volume_1m=max(effective_1m * 0.25, order.requested_quantity * 3.0, 1.0),
         )
 
     def _normalized_resolved_outcome(

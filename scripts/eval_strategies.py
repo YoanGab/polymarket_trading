@@ -22,7 +22,7 @@ from polymarket_backtest.grid_search import (
     run_grid_search,
 )
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest.sqlite"
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest_v2.sqlite"
 RESULTS_TSV = Path(__file__).resolve().parent.parent / "results.tsv"
 
 

@@ -427,40 +427,62 @@ def compute_sharpe_like(conn: sqlite3.Connection, experiment_id: int) -> list[di
     rows = _rows(
         conn,
         """
-        SELECT strategy_name, ts, equity
+        SELECT strategy_name, ts, equity, position_qty, rowid
         FROM pnl_marks
         WHERE experiment_id = ?
-        ORDER BY strategy_name, ts
+        ORDER BY strategy_name, ts, rowid
         """,
         (experiment_id,),
     )
-    equity_by_strategy: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
+    equity_by_strategy: dict[str, list[tuple[datetime, float, bool]]] = defaultdict(list)
+    current_key: tuple[str, str] | None = None
+    current_equity = 0.0
+    current_has_active_position = False
     for row in rows:
-        equity_by_strategy[str(row["strategy_name"])].append(
-            (datetime.fromisoformat(str(row["ts"])), float(row["equity"]))
+        key = (str(row["strategy_name"]), str(row["ts"]))
+        if current_key is not None and key != current_key:
+            equity_by_strategy[current_key[0]].append(
+                (
+                    datetime.fromisoformat(current_key[1]),
+                    current_equity,
+                    current_has_active_position,
+                )
+            )
+            current_has_active_position = False
+        current_key = key
+        current_equity = float(row["equity"])
+        current_has_active_position = current_has_active_position or float(row["position_qty"] or 0.0) > 0.0
+    if current_key is not None:
+        equity_by_strategy[current_key[0]].append(
+            (
+                datetime.fromisoformat(current_key[1]),
+                current_equity,
+                current_has_active_position,
+            )
         )
+
     results = []
     for strategy, ts_equity_values in sorted(equity_by_strategy.items()):
-        timestamps = [ts for ts, _ in ts_equity_values]
-        equity_values = [eq for _, eq in ts_equity_values]
-        returns = []
-        for previous, current in zip(equity_values, equity_values[1:], strict=False):
-            if previous > 0:
-                returns.append((current - previous) / previous)
-        # Require at least 10 data points for a meaningful Sharpe ratio
-        if len(returns) < 10:
+        daily_equity: dict[str, float] = {}
+        for ts, equity, has_active_position in ts_equity_values:
+            if not has_active_position:
+                continue
+            daily_equity[ts.date().isoformat()] = equity
+
+        if len(daily_equity) < 10:
             sharpe = 0.0
         else:
-            mean_return = _mean(returns)
-            std_return = stdev(returns)
-            if std_return > 0 and len(timestamps) >= 2:
-                # Approximate annualization based on average snapshot interval
-                total_seconds = (timestamps[-1] - timestamps[0]).total_seconds()
-                avg_interval_seconds = total_seconds / (len(timestamps) - 1)
-                periods_per_year = 365.25 * 24 * 3600 / max(avg_interval_seconds, 1)
-                sharpe = (mean_return / std_return) * math.sqrt(periods_per_year)
-            else:
+            equity_values = list(daily_equity.values())
+            daily_returns = [
+                (current - previous) / previous
+                for previous, current in zip(equity_values, equity_values[1:], strict=False)
+                if previous > 0
+            ]
+            if len(daily_returns) < 2:
                 sharpe = 0.0
+            else:
+                std_return = stdev(daily_returns)
+                sharpe = (_mean(daily_returns) / std_return) * math.sqrt(365.0) if std_return > 0 else 0.0
         results.append({"strategy_name": strategy, "sharpe_like": round(sharpe, 6)})
     return results
 

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from statistics import mean, stdev
 
 import pytest
 
-from polymarket_backtest.metrics import compute_calibration_curve
+from polymarket_backtest.metrics import compute_calibration_curve, compute_sharpe_like
 from polymarket_backtest.replay_engine import ReplayEngine, StrategyPortfolio
 from polymarket_backtest.strategies import StrategyEngine
 from polymarket_backtest.types import (
@@ -176,3 +177,144 @@ def test_compute_calibration_curve_skips_unresolved_markets() -> None:
     curve = compute_calibration_curve(conn, 1, bins=5)
 
     assert curve == [{"bucket": 1, "forecast_mean": 0.2, "realized_rate": 1.0, "n": 1}]
+
+
+def test_compute_sharpe_like_uses_active_daily_marks_only() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE pnl_marks (
+            experiment_id INTEGER,
+            strategy_name TEXT,
+            market_id TEXT,
+            ts TEXT,
+            cash REAL,
+            position_qty REAL,
+            mark_price REAL,
+            inventory_value REAL,
+            equity REAL,
+            realized_pnl REAL,
+            unrealized_pnl REAL
+        )
+        """
+    )
+
+    base_day = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+    active_equities = [100.0, 108.0, 103.0, 117.0, 112.0, 126.0, 121.0, 135.0, 132.0, 145.0, 141.0, 154.0]
+    rows: list[tuple[int, str, str, str, float, float, float, float, float, float, float]] = []
+
+    for day_offset, equity in enumerate(active_equities):
+        day = base_day + timedelta(days=day_offset)
+        rows.extend(
+            [
+                (
+                    1,
+                    "active_strategy",
+                    "market-a",
+                    day.isoformat(),
+                    1000.0,
+                    1.0,
+                    0.5,
+                    10.0,
+                    equity - 1.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    1,
+                    "active_strategy",
+                    "market-a",
+                    day.replace(hour=15).isoformat(),
+                    1000.0,
+                    1.0,
+                    0.5,
+                    10.0,
+                    equity - 0.5,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    1,
+                    "active_strategy",
+                    "market-b",
+                    day.replace(hour=15).isoformat(),
+                    1000.0,
+                    0.0,
+                    0.5,
+                    0.0,
+                    equity,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    1,
+                    "active_strategy",
+                    "market-c",
+                    day.replace(hour=23).isoformat(),
+                    1000.0,
+                    0.0,
+                    0.5,
+                    0.0,
+                    equity + 50.0,
+                    0.0,
+                    0.0,
+                ),
+            ]
+        )
+
+    for day_offset, equity in enumerate([200.0, 220.0, 210.0], start=len(active_equities)):
+        day = base_day + timedelta(days=day_offset)
+        rows.append(
+            (
+                1,
+                "active_strategy",
+                "market-flat",
+                day.isoformat(),
+                1000.0,
+                0.0,
+                0.5,
+                0.0,
+                equity,
+                0.0,
+                0.0,
+            )
+        )
+
+    for day_offset, equity in enumerate([100.0, 101.0, 103.0, 102.0, 104.0, 103.0, 105.0, 104.0, 106.0]):
+        day = base_day + timedelta(days=day_offset)
+        rows.append(
+            (
+                1,
+                "too_short",
+                "market-short",
+                day.isoformat(),
+                1000.0,
+                1.0,
+                0.5,
+                10.0,
+                equity,
+                0.0,
+                0.0,
+            )
+        )
+
+    conn.executemany(
+        """
+        INSERT INTO pnl_marks (
+            experiment_id, strategy_name, market_id, ts, cash, position_qty,
+            mark_price, inventory_value, equity, realized_pnl, unrealized_pnl
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+    sharpe_by_strategy = {item["strategy_name"]: item["sharpe_like"] for item in compute_sharpe_like(conn, 1)}
+    daily_returns = [
+        (current - previous) / previous
+        for previous, current in zip(active_equities, active_equities[1:], strict=False)
+    ]
+    expected_sharpe = round((mean(daily_returns) / stdev(daily_returns)) * (365.0**0.5), 6)
+
+    assert sharpe_by_strategy["active_strategy"] == expected_sharpe
+    assert sharpe_by_strategy["too_short"] == 0.0

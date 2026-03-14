@@ -47,12 +47,13 @@ class MLModelTransport:
         context_bundle: dict[str, Any],
     ) -> dict[str, Any]:
         market = context_bundle["market"]
+        as_of = context_bundle.get("as_of")
         mid = float(market["mid"])
         best_ask = float(market["best_ask"])
         best_bid = float(market["best_bid"])
 
         # Build a fake sqlite3.Row-like dict for feature extraction
-        row = _market_to_row(market)
+        row = _market_to_row(market, as_of=as_of)
         features = extract_snapshot_features(row, prev_rows=[])
 
         # Create feature vector in correct order
@@ -74,7 +75,7 @@ class MLModelTransport:
         else:
             thesis = "ML model: no edge"
 
-        confidence = min(0.95, max(0.10, 0.5 + abs(probability - 0.5)))
+        confidence = _edge_based_confidence(probability, best_bid, best_ask)
 
         return {
             "agent_name": self.agent_name,
@@ -167,7 +168,17 @@ class _DictRow:
         return list(self._data.keys())
 
 
-def _market_to_row(market: dict[str, Any]) -> Any:
+def _edge_based_confidence(probability: float, best_bid: float, best_ask: float) -> float:
+    """Use tradable edge as a simple confidence proxy."""
+    tradable_edge_bps = max(
+        (probability - best_ask) * 10_000.0,
+        (best_bid - probability) * 10_000.0,
+        0.0,
+    )
+    return min(0.95, 0.5 + tradable_edge_bps / 1_000.0)
+
+
+def _market_to_row(market: dict[str, Any], *, as_of: Any = None) -> Any:
     """Convert a context_bundle market dict to a row-like object for feature extraction."""
     return _DictRow(
         {
@@ -179,6 +190,6 @@ def _market_to_row(market: dict[str, Any]) -> Any:
             "volume_24h": market.get("volume_24h", 0.0),
             "open_interest": market.get("open_interest", 0.0),
             "resolution_ts": market.get("resolution_ts"),
-            "ts": market.get("ts", market.get("as_of", "")),
+            "ts": market.get("ts", as_of or market.get("as_of", "")),
         }
     )
