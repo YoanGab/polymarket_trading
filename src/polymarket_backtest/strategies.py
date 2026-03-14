@@ -572,7 +572,7 @@ class StrategyEngine:
         # Scale down for edge-of-range markets (further from 0.50 = less confident)
         half_range = max(0.01, (mid_high - mid_low) / 2.0)
         mid_distance = abs(market.mid - 0.50) / half_range
-        mid_factor = max(0.05, 1.0 - mid_distance)
+        mid_factor = max(0.05, 1.0 - mid_distance * 1.2)
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         notional = min(
             config.max_position_notional,
