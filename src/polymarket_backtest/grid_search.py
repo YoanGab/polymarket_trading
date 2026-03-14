@@ -306,7 +306,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_low=0.70,
             extreme_high=0.95,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.06,
         ),
         # High-odds core: tight high range, aggressive sizing
         StrategyConfig(
