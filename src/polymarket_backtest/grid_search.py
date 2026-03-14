@@ -69,6 +69,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
+        # Near-term extended: 10-day window, moderate edge
+        StrategyConfig(
+            name="nearterm_extended",
+            family="resolution_convergence",
+            kelly_fraction=0.30,
+            edge_threshold_bps=200.0,
+            max_position_notional=1000.0,
+            max_holding_minutes=None,
+            resolution_hours_max=240.0,
+            min_confidence=0.65,
+            extreme_low=0.20,
+            extreme_high=0.80,
+            **shared,
+        ),
         # Medium-term: 2-week window, moderate edge (between nearterm and main)
         StrategyConfig(
             name="resolution_medium",
