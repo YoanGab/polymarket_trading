@@ -566,7 +566,10 @@ class StrategyEngine:
         edge_bps = (forecast.probability_yes - ask_price) * 10_000.0
         fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
         net_edge_bps = edge_bps - fee_bps
-        if net_edge_bps < config.edge_threshold_bps:
+        # Time-decay: lower edge requirement near resolution (short holding = less risk)
+        time_ratio = hours_to_res / config.resolution_hours_max
+        adjusted_threshold = config.edge_threshold_bps * max(0.3, time_ratio)
+        if net_edge_bps < adjusted_threshold:
             return []
 
         # Scale down for edge-of-range markets (further from 0.50 = less confident)
