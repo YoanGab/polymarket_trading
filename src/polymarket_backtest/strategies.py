@@ -550,7 +550,31 @@ class StrategyEngine:
             return []
 
         if position is not None and position.quantity > 0:
-            # Pure hold-to-resolution: no early exits
+            # Average in: add to position if edge increased and room remains
+            current_notional = position.quantity * position.avg_entry_price
+            if current_notional < config.max_position_notional * 0.90:
+                ask_price_add = normalized_ask_price(market.best_ask)
+                add_edge = (forecast.probability_yes - ask_price_add) * 10_000.0
+                entry_edge = (position.entry_probability - position.avg_entry_price) * 10_000.0
+                if add_edge > max(entry_edge * 1.5, config.edge_threshold_bps * 2):
+                    remaining = config.max_position_notional - current_notional
+                    add_qty = min(remaining, available_cash * 0.1) / ask_price_add
+                    if add_qty >= MIN_ORDER_QUANTITY:
+                        return [
+                            OrderIntent(
+                                strategy_name=config.name,
+                                market_id=market.market_id,
+                                ts=market.ts,
+                                side="buy",
+                                liquidity_intent="aggressive",
+                                limit_price=ask_price_add,
+                                requested_quantity=add_qty,
+                                kelly_fraction=config.kelly_fraction,
+                                edge_bps=add_edge,
+                                holding_period_minutes=int(hours_to_res * 60),
+                                thesis=f"Averaging in: edge increased to {add_edge:.0f}bps",
+                            ),
+                        ]
             return []
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
