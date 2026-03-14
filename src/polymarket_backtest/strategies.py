@@ -577,8 +577,7 @@ class StrategyEngine:
         else:
             mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
-        raw_cf = (forecast.confidence - 0.55) * 10.0
-        confidence_factor = min(3.0, max(0.5, raw_cf**0.7 if raw_cf > 0 else raw_cf))
+        confidence_factor = min(3.0, max(0.5, (forecast.confidence - 0.55) * 10.0))
         notional = min(
             config.max_position_notional,
             available_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
