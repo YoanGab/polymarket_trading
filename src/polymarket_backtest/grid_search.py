@@ -237,6 +237,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
+        # Carry: buy high-confidence YES near resolution
+        StrategyConfig(
+            name="carry_high",
+            family="carry_only",
+            kelly_fraction=0.30,
+            edge_threshold_bps=50.0,
+            max_position_notional=1000.0,
+            max_holding_minutes=None,
+            carry_price_min=0.90,
+            carry_price_max=0.99,
+            carry_exit_threshold=0.05,
+            aggressive_entry=True,
+            **shared,
+        ),
     ]
 
 
