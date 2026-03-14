@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -461,6 +462,86 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
     ]
 
 
+def _stratified_market_sample(
+    conn: sqlite3.Connection,
+    max_markets: int,
+    *,
+    min_snapshots: int = 20,
+    seed: int = 42,
+) -> list[str]:
+    """Sample markets with stratified random selection by resolution period.
+
+    Buckets markets by how long they lasted (short/medium/long/very_long),
+    then samples proportionally from each bucket. This avoids the bias of
+    selecting only the longest-running markets.
+    """
+    rows = conn.execute(
+        """
+        SELECT ms.market_id, COUNT(*) as cnt,
+               MIN(ms.ts) as first_ts, MAX(ms.ts) as last_ts
+        FROM market_snapshots ms
+        JOIN market_resolutions mr ON mr.market_id = ms.market_id
+        GROUP BY ms.market_id
+        HAVING cnt >= ?
+        """,
+        (min_snapshots,),
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    # Bucket by market duration
+    buckets: dict[str, list[str]] = {
+        "short": [],  # < 7 days
+        "medium": [],  # 7-30 days
+        "long": [],  # 30-90 days
+        "very_long": [],  # 90+ days
+    }
+    for row in rows:
+        market_id = str(row["market_id"])
+        cnt = int(row["cnt"])
+        # Approximate duration from snapshot count (hourly snapshots)
+        duration_days = cnt / 24.0
+        if duration_days < 7:
+            buckets["short"].append(market_id)
+        elif duration_days < 30:
+            buckets["medium"].append(market_id)
+        elif duration_days < 90:
+            buckets["long"].append(market_id)
+        else:
+            buckets["very_long"].append(market_id)
+
+    # Proportional allocation with minimum 1 per non-empty bucket
+    non_empty = {k: v for k, v in buckets.items() if v}
+    total_available = sum(len(v) for v in non_empty.values())
+    if total_available == 0:
+        return []
+
+    rng = random.Random(seed)
+    selected: list[str] = []
+    remaining = max_markets
+
+    for bucket_name, bucket_markets in non_empty.items():
+        proportion = len(bucket_markets) / total_available
+        n = max(1, int(proportion * max_markets))
+        n = min(n, len(bucket_markets), remaining)
+        if n <= 0:
+            continue
+        sample = rng.sample(bucket_markets, n)
+        selected.extend(sample)
+        remaining -= n
+
+    # Fill remaining slots from largest bucket
+    if remaining > 0:
+        largest = max(non_empty.values(), key=len)
+        available = [m for m in largest if m not in set(selected)]
+        extra = rng.sample(available, min(remaining, len(available)))
+        selected.extend(extra)
+
+    rng.shuffle(selected)
+    return selected
+
+
 def _open_execution_db(db_path: Path, *, in_memory: bool) -> sqlite3.Connection:
     """Open a DB connection for grid search execution.
 
@@ -512,22 +593,10 @@ def run_grid_search(
     try:
         db.init_db(conn)
 
-        # Determine which market IDs to replay
+        # Determine which market IDs to replay (stratified random sampling)
         market_ids: list[str] | None = None
         if max_markets is not None:
-            market_ids = [
-                str(row["market_id"])
-                for row in conn.execute(
-                    """
-                    SELECT market_id, COUNT(*) as cnt
-                    FROM market_snapshots
-                    GROUP BY market_id
-                    ORDER BY cnt DESC
-                    LIMIT ?
-                    """,
-                    (max_markets,),
-                ).fetchall()
-            ]
+            market_ids = _stratified_market_sample(conn, max_markets)
             if not market_ids:
                 raise ValueError(f"No market data found in {db_path}")
 
