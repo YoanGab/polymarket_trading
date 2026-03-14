@@ -190,11 +190,12 @@ Work in phases. Do not skip ahead.
 3. Commit the change.
 4. Run the experiment:
    - For model changes: `uv run python scripts/train_model.py --model xgboost > run.log 2>&1`
-   - For strategy changes: `uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 500 --split val > eval.log 2>&1`
+   - For strategy changes: `uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 100 --split val > eval.log 2>&1`
    - The eval uses v2 with stratified sampling on the **val split** (Oct-Dec 2025 markets). This is out-of-sample for the model.
+   - Use `--max-markets 100` for fast iteration (~10 min). Every 5 experiments, run `--max-markets 500` for robustness.
    - For final evaluation only: use `--split test` (Jan 2026+ markets). Do NOT use test for tuning.
    - Never switch back to the old v1 or top-N evaluation logic.
-   - Promising strategy results are not real until they survive multiple stratified sampling seeds.
+   - **Timeout**: The v2 DB copy to RAM takes ~2-3 min. Total eval should complete within 10-15 min. If it exceeds 20 min, kill and retry with fewer markets.
 5. Read out the results from `run.log` and/or `eval.log`.
 6. If the expected metrics are missing, the run crashed. Read the stack trace and attempt a fix.
 7. Record the results in `results.tsv`.
