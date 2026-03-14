@@ -229,20 +229,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
-        # Asymmetric YES-side: target low-mid markets where model predicts up
-        StrategyConfig(
-            name="resolution_yes_side",
-            family="resolution_convergence",
-            kelly_fraction=0.40,
-            edge_threshold_bps=300.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.65,
-            extreme_low=0.15,
-            extreme_high=0.50,
-            **shared,
-        ),
         # Contrarian upsized: same thresholds, larger positions
         StrategyConfig(
             name="contrarian_hold_bigk",
