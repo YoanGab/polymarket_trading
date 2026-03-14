@@ -381,7 +381,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_low=0.15,
             extreme_high=0.80,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.12,
         ),
         # Conviction lowodds extended: confident underdogs at 10-day horizon
         StrategyConfig(
