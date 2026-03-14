@@ -351,7 +351,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_low=0.25,
             extreme_high=0.80,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.12,
         ),
         # High conviction lowodds: confident predictions on underdogs
         StrategyConfig(
