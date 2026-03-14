@@ -69,20 +69,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
-        # Contrarian: buy cheap YES near resolution when model disagrees
-        StrategyConfig(
-            name="contrarian_resolution",
-            family="contrarian",
-            kelly_fraction=0.30,
-            edge_threshold_bps=500.0,
-            max_position_notional=500.0,
-            max_holding_minutes=720,
-            resolution_hours_max=720.0,
-            min_confidence=0.65,
-            extreme_low=0.15,
-            extreme_high=0.85,
-            **shared,
-        ),
     ]
 
 

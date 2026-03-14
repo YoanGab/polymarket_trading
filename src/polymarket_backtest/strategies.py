@@ -317,18 +317,6 @@ class StrategyEngine:
         Idea: markets at 0.95+ or 0.05- often overshoot. If the forecast
         disagrees with the extreme, bet on the correction.
         """
-        # Optional resolution constraint (if resolution_hours_max < default 72)
-        if config.resolution_hours_max < 9999:
-            seconds_to_res = market.seconds_to_resolution
-            if seconds_to_res is None:
-                return []
-            hours_to_res = seconds_to_res / 3600.0
-            if hours_to_res > config.resolution_hours_max or hours_to_res <= 0:
-                return []
-
-        if forecast.confidence < config.min_confidence:
-            return []
-
         if position is not None and position.quantity > 0:
             # Exit if mid moved back toward 0.50 (contrarian thesis played out)
             # For nothesis variants, use thesis_stop_delta as exit buffer above extreme_low
