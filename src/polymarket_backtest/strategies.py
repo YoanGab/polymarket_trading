@@ -576,13 +576,10 @@ class StrategyEngine:
             mid_factor = 1.0
         else:
             mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
-        # Reduce position when spread is wide (> 4% = illiquid)
-        spread = market.best_ask - market.best_bid
-        spread_factor = max(0.20, 1.0 - max(0.0, spread - 0.02) * 10.0)
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         notional = min(
             config.max_position_notional,
-            available_cash * config.kelly_fraction * kelly * mid_factor * spread_factor,
+            available_cash * config.kelly_fraction * kelly * mid_factor,
         )
         if notional <= 0:
             return []
