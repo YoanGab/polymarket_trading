@@ -368,6 +368,21 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
+        # Conviction lowodds extended: confident underdogs at 10-day horizon
+        StrategyConfig(
+            name="conviction_lowodds_ext",
+            family="resolution_convergence",
+            kelly_fraction=0.45,
+            edge_threshold_bps=400.0,
+            max_position_notional=1500.0,
+            max_holding_minutes=None,
+            resolution_hours_max=240.0,
+            min_confidence=0.75,
+            extreme_low=0.15,
+            extreme_high=0.80,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+        ),
         # Conviction lowodds medium: confident underdogs at 2-week horizon
         StrategyConfig(
             name="conviction_lowodds_med",
