@@ -223,6 +223,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
+        # Low-odds aggressive: lower edge threshold for more trades
+        StrategyConfig(
+            name="lowodds_aggressive",
+            family="resolution_convergence",
+            kelly_fraction=0.25,
+            edge_threshold_bps=600.0,
+            max_position_notional=800.0,
+            max_holding_minutes=None,
+            resolution_hours_max=720.0,
+            min_confidence=0.65,
+            extreme_low=0.10,
+            extreme_high=0.80,
+            **shared,
+        ),
     ]
 
 
