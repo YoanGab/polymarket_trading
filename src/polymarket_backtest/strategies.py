@@ -569,10 +569,9 @@ class StrategyEngine:
         if net_edge_bps < config.edge_threshold_bps:
             return []
 
-        # Scale down for edge-of-range markets (further from range center = less confident)
+        # Scale down for edge-of-range markets (further from 0.50 = less confident)
         half_range = max(0.01, (mid_high - mid_low) / 2.0)
-        mid_center = (mid_low + mid_high) / 2.0
-        mid_distance = abs(market.mid - mid_center) / half_range
+        mid_distance = abs(market.mid - 0.50) / half_range
         if mid_distance < 0.5:
             mid_factor = 1.0
         else:
