@@ -338,21 +338,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # High conviction near-term: very confident predictions at short horizon
-        StrategyConfig(
-            name="high_conviction_near",
-            family="resolution_convergence",
-            kelly_fraction=0.60,
-            edge_threshold_bps=50.0,
-            max_position_notional=2000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=168.0,
-            min_confidence=0.75,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
