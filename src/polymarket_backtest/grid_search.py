@@ -156,7 +156,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_low=0.30,
             extreme_high=0.70,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.12,
         ),
         # Core extended: mid-range trades with longer horizon
         StrategyConfig(
