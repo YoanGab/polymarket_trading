@@ -81,13 +81,9 @@ class StrategyEngine:
             age_minutes = (ensure_utc(market.ts) - ensure_utc(opened_ts)).total_seconds() / 60.0
             if age_minutes >= max_hold:
                 return True
-        if not config.use_thesis_stop:
-            return False
-        # Original thesis stop: probability dropped significantly
-        if forecast.probability_yes < position.entry_probability - config.thesis_stop_delta:
-            return True
-        # Confidence stop: model lost conviction — exit if confidence below entry threshold
-        return forecast.confidence < config.min_confidence
+        return (
+            config.use_thesis_stop and forecast.probability_yes < position.entry_probability - config.thesis_stop_delta
+        )
 
     def exit_order(
         self,
