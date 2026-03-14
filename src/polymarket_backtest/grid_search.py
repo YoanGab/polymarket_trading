@@ -209,6 +209,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
+        # Ultra-low-odds: extreme discounts with very high edge
+        StrategyConfig(
+            name="resolution_ultralow",
+            family="resolution_convergence",
+            kelly_fraction=0.25,
+            edge_threshold_bps=1200.0,
+            max_position_notional=800.0,
+            max_holding_minutes=None,
+            resolution_hours_max=720.0,
+            min_confidence=0.65,
+            extreme_low=0.05,
+            extreme_high=0.80,
+            **shared,
+        ),
     ]
 
 
