@@ -206,7 +206,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             resolution_hours_max=720.0,
             min_confidence=0.65,
             extreme_low=0.15,
-            extreme_high=0.80,
+            extreme_high=0.70,
             **shared,
         ),
         # Low-odds long-term: underdogs with longer time horizon
