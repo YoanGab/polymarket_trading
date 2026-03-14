@@ -566,10 +566,7 @@ class StrategyEngine:
         edge_bps = (forecast.probability_yes - ask_price) * 10_000.0
         fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
         net_edge_bps = edge_bps - fee_bps
-        # High-confidence trades need less edge (model is more reliable)
-        confidence_discount = max(0.5, 1.0 - (forecast.confidence - 0.65) * 2.0)
-        adjusted_threshold = config.edge_threshold_bps * confidence_discount
-        if net_edge_bps < adjusted_threshold:
+        if net_edge_bps < config.edge_threshold_bps:
             return []
 
         # Scale down for edge-of-range markets (further from 0.50 = less confident)
