@@ -293,20 +293,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
-        # Ultra-short: 2-day window
-        StrategyConfig(
-            name="resolution_48h",
-            family="resolution_convergence",
-            kelly_fraction=0.30,
-            edge_threshold_bps=200.0,
-            max_position_notional=1000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=48.0,
-            min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            **shared,
-        ),
     ]
 
 
