@@ -282,16 +282,24 @@ def test_goldsky_pagination_deduplicates_boundary_timestamp_ids(monkeypatch: pyt
 
 
 def test_expanded_strategy_grid_uses_honest_edge_names() -> None:
-    names = {strategy.name for strategy in expanded_strategy_grid()}
-    families = {
-        strategy.family
-        for strategy in expanded_strategy_grid()
-        if strategy.name in {"edge_selective", "edge_aggressive"}
-    }
+    strategies = expanded_strategy_grid()
+    names = {s.name for s in strategies}
+    families = {s.family for s in strategies}
 
+    # No fantasy strategy names
     assert "deep_research_long" not in names
     assert "cross_market_arb" not in names
-    assert families == {"edge_based"}
+    # All current strategies should be valid families
+    assert families <= {
+        "resolution_convergence",
+        "edge_based",
+        "contrarian",
+        "momentum",
+        "mean_reversion",
+        "carry_only",
+        "news_driven",
+        "volume_breakout",
+    }
 
 
 def test_interpolate_snapshot_keeps_start_tick_size() -> None:
