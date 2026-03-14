@@ -158,21 +158,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # Core 20-day: mid-range at 20-day horizon
-        StrategyConfig(
-            name="core_20d",
-            family="resolution_convergence",
-            kelly_fraction=0.90,
-            edge_threshold_bps=30.0,
-            max_position_notional=3000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=480.0,
-            min_confidence=0.65,
-            extreme_low=0.30,
-            extreme_high=0.70,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
         # Core medium: mid-range at 40-day horizon
         StrategyConfig(
             name="core_medium",
