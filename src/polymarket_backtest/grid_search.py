@@ -293,21 +293,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # Ultra-short: 2-day window, low edge for last-minute convergence
-        StrategyConfig(
-            name="resolution_48h",
-            family="resolution_convergence",
-            kelly_fraction=0.50,
-            edge_threshold_bps=100.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=48.0,
-            min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
