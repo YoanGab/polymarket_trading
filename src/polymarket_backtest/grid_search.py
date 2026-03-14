@@ -428,6 +428,21 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
+        # Conviction high-odds: confident predictions on likely-YES markets
+        StrategyConfig(
+            name="conviction_highodds",
+            family="resolution_convergence",
+            kelly_fraction=0.40,
+            edge_threshold_bps=200.0,
+            max_position_notional=1200.0,
+            max_holding_minutes=None,
+            resolution_hours_max=720.0,
+            min_confidence=0.75,
+            extreme_low=0.70,
+            extreme_high=0.95,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
