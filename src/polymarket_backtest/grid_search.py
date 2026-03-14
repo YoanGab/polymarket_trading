@@ -98,6 +98,21 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
+        # 20-day: fills gap between medium (336h) and main (720h)
+        StrategyConfig(
+            name="resolution_20d",
+            family="resolution_convergence",
+            kelly_fraction=0.40,
+            edge_threshold_bps=450.0,
+            max_position_notional=1500.0,
+            max_holding_minutes=None,
+            resolution_hours_max=480.0,
+            min_confidence=0.65,
+            extreme_low=0.25,
+            extreme_high=0.80,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+        ),
         # Long-term: 60-day window, high edge requirement
         StrategyConfig(
             name="resolution_longterm",
