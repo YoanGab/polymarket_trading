@@ -454,7 +454,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             resolution_hours_max=720.0,
             min_confidence=0.75,
             extreme_low=0.25,
-            extreme_high=0.80,
+            extreme_high=0.75,
             use_thesis_stop=True,
             thesis_stop_delta=0.12,
         ),
