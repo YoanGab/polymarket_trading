@@ -332,7 +332,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             max_position_notional=2500.0,
             max_holding_minutes=None,
             resolution_hours_max=720.0,
-            min_confidence=0.75,
+            min_confidence=0.80,
             extreme_low=0.25,
             extreme_high=0.80,
             use_thesis_stop=True,
