@@ -190,7 +190,7 @@ Work in phases. Do not skip ahead.
 3. Commit the change.
 4. Run the experiment:
    - For model changes: `uv run python scripts/train_model.py --model logistic > run.log 2>&1`
-   - For strategy changes: `uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 500 > eval.log 2>&1`
+   - For strategy changes: `uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 500 --no-in-memory > eval.log 2>&1`
    - The eval must use the v2 + stratified-sampling path. Never switch back to the old v1 or top-N evaluation logic.
    - Promising strategy results are not real until they survive multiple stratified sampling seeds.
 5. Read out the results from `run.log` and/or `eval.log`.

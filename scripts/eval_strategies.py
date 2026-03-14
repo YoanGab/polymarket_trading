@@ -57,6 +57,12 @@ def main() -> None:
         default=None,
         help="Exclude markets in this category (can repeat). E.g., --exclude-category Sports",
     )
+    parser.add_argument(
+        "--no-in-memory",
+        action="store_true",
+        default=False,
+        help="Disable in-memory DB copy (required for large DBs like v2 at 20GB)",
+    )
     args = parser.parse_args()
 
     if not DB_PATH.exists():
@@ -71,6 +77,7 @@ def main() -> None:
         max_markets=args.max_markets,
         transport_factory=transport_factory,
         exclude_categories=args.exclude_category,
+        in_memory=not args.no_in_memory,
     )
     ranked = rank_strategies(results)
     elapsed = time.monotonic() - start
