@@ -23,10 +23,6 @@ DEFAULT_MODEL_RELEASE = os.environ.get("GROK_MODEL_RELEASE", "grok-3")
 
 
 def expanded_strategy_grid() -> list[StrategyConfig]:
-    shared = {
-        "use_thesis_stop": True,
-        "thesis_stop_delta": 0.08,
-    }
     return [
         StrategyConfig(
             name="resolution_convergence",
