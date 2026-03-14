@@ -105,9 +105,9 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
         StrategyConfig(
             name="resolution_longterm",
             family="resolution_convergence",
-            kelly_fraction=0.40,
+            kelly_fraction=0.50,
             edge_threshold_bps=700.0,
-            max_position_notional=1500.0,
+            max_position_notional=2000.0,
             max_holding_minutes=None,
             resolution_hours_max=1440.0,
             min_confidence=0.65,
