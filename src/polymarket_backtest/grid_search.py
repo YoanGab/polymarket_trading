@@ -139,7 +139,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
-        # Wide mega: wide-range at 6-month horizon, very high edge
+        # Wide mega: wide-range at 4-month horizon, very high edge
         StrategyConfig(
             name="resolution_mega",
             family="resolution_convergence",
@@ -147,7 +147,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             edge_threshold_bps=1200.0,
             max_position_notional=1200.0,
             max_holding_minutes=None,
-            resolution_hours_max=4320.0,
+            resolution_hours_max=3000.0,
             min_confidence=0.65,
             extreme_low=0.20,
             extreme_high=0.80,
