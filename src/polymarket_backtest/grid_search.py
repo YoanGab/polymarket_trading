@@ -321,7 +321,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_low=0.75,
             extreme_high=0.92,
             use_thesis_stop=True,
-            thesis_stop_delta=0.12,
+            thesis_stop_delta=0.10,
         ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
