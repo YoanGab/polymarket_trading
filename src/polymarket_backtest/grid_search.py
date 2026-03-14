@@ -83,6 +83,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.75,
             **shared,
         ),
+        # Ultra-long: 90-day window, very high edge for early conviction trades
+        StrategyConfig(
+            name="resolution_ultralong",
+            family="resolution_convergence",
+            kelly_fraction=0.20,
+            edge_threshold_bps=1000.0,
+            max_position_notional=800.0,
+            max_holding_minutes=None,
+            resolution_hours_max=2160.0,
+            min_confidence=0.65,
+            extreme_low=0.25,
+            extreme_high=0.75,
+            **shared,
+        ),
         # Core mid-range: catch medium-edge trades in the safe zone
         StrategyConfig(
             name="resolution_core",
