@@ -96,7 +96,8 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             min_confidence=0.65,
             extreme_low=0.25,
             extreme_high=0.80,
-            **shared,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
         ),
         # Long-term: 60-day window, high edge requirement
         StrategyConfig(
