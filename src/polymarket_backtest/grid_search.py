@@ -56,7 +56,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             **shared,
         ),
         # Core mid-range: catch medium-edge trades in the safe zone
-        # Tighter thesis_stop exits losers faster, freeing capital for new trades
         StrategyConfig(
             name="resolution_core",
             family="resolution_convergence",
@@ -68,8 +67,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             min_confidence=0.65,
             extreme_low=0.30,
             extreme_high=0.70,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.05,
+            **shared,
         ),
     ]
 
