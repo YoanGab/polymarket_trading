@@ -139,6 +139,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
+        # Near-term extended core: 10-day tight mid range
+        StrategyConfig(
+            name="nearterm_ext_core",
+            family="resolution_convergence",
+            kelly_fraction=0.80,
+            edge_threshold_bps=30.0,
+            max_position_notional=2500.0,
+            max_holding_minutes=None,
+            resolution_hours_max=240.0,
+            min_confidence=0.65,
+            extreme_low=0.30,
+            extreme_high=0.70,
+            **shared,
+        ),
         # Core medium: mid-range at 40-day horizon
         StrategyConfig(
             name="core_medium",
