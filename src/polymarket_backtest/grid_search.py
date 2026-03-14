@@ -55,6 +55,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
+        # Medium-term: 2-week window, moderate edge (between nearterm and main)
+        StrategyConfig(
+            name="resolution_medium",
+            family="resolution_convergence",
+            kelly_fraction=0.35,
+            edge_threshold_bps=300.0,
+            max_position_notional=1200.0,
+            max_holding_minutes=None,
+            resolution_hours_max=336.0,
+            min_confidence=0.65,
+            extreme_low=0.20,
+            extreme_high=0.80,
+            **shared,
+        ),
         # Core mid-range: catch medium-edge trades in the safe zone
         StrategyConfig(
             name="resolution_core",
