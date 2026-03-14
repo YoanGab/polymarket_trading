@@ -550,7 +550,25 @@ class StrategyEngine:
             return []
 
         if position is not None and position.quantity > 0:
-            # Pure hold-to-resolution: no early exits
+            # Take profit if edge has turned negative and we're in the green
+            profit_bps = (market.best_bid - position.avg_entry_price) * 10_000.0
+            model_edge = (forecast.probability_yes - market.best_bid) * 10_000.0
+            if profit_bps > 500.0 and model_edge < 0:
+                return [
+                    OrderIntent(
+                        strategy_name=config.name,
+                        market_id=market.market_id,
+                        ts=market.ts,
+                        side="sell",
+                        liquidity_intent="aggressive",
+                        limit_price=market.best_bid,
+                        requested_quantity=position.quantity,
+                        kelly_fraction=config.kelly_fraction,
+                        edge_bps=profit_bps,
+                        holding_period_minutes=0,
+                        thesis=f"Take profit: +{profit_bps:.0f}bps, edge gone ({model_edge:.0f}bps)",
+                    ),
+                ]
             return []
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
