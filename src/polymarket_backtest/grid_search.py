@@ -69,6 +69,18 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.70,
             **shared,
         ),
+        # Pure edge: no resolution constraint, extreme selectivity
+        StrategyConfig(
+            name="edge_selective",
+            family="edge_based",
+            kelly_fraction=0.20,
+            edge_threshold_bps=1000.0,
+            max_position_notional=500.0,
+            max_holding_minutes=720,
+            min_confidence=0.70,
+            aggressive_entry=True,
+            **shared,
+        ),
     ]
 
 
