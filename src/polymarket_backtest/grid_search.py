@@ -42,6 +42,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             **shared,
         ),
         # Near-term resolution: short window, moderate edge
+        # Wider thesis_stop gives more room for fluctuation in short horizon
         StrategyConfig(
             name="resolution_nearterm",
             family="resolution_convergence",
@@ -53,7 +54,8 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             min_confidence=0.65,
             extreme_low=0.20,
             extreme_high=0.80,
-            **shared,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.12,
         ),
         # Core mid-range: catch medium-edge trades in the safe zone
         StrategyConfig(
