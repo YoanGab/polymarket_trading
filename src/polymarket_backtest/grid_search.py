@@ -200,7 +200,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             name="resolution_lowodds",
             family="resolution_convergence",
             kelly_fraction=0.30,
-            edge_threshold_bps=700.0,
+            edge_threshold_bps=800.0,
             max_position_notional=1000.0,
             max_holding_minutes=None,
             resolution_hours_max=720.0,
