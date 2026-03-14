@@ -209,7 +209,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             edge_threshold_bps=150.0,
             max_position_notional=1000.0,
             max_holding_minutes=None,
-            resolution_hours_max=168.0,
+            resolution_hours_max=336.0,
             min_confidence=0.65,
             extreme_low=0.20,
             extreme_high=0.80,
