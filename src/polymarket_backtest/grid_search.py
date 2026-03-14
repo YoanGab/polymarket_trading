@@ -205,9 +205,9 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
         StrategyConfig(
             name="resolution_nearterm",
             family="resolution_convergence",
-            kelly_fraction=0.40,
-            edge_threshold_bps=200.0,
-            max_position_notional=1500.0,
+            kelly_fraction=0.30,
+            edge_threshold_bps=150.0,
+            max_position_notional=1000.0,
             max_holding_minutes=None,
             resolution_hours_max=168.0,
             min_confidence=0.65,
