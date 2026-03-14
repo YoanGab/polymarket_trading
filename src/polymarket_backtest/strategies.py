@@ -573,12 +573,10 @@ class StrategyEngine:
         half_range = max(0.01, (mid_high - mid_low) / 2.0)
         mid_distance = abs(market.mid - 0.50) / half_range
         mid_factor = max(0.15, 1.0 - mid_distance * 0.85)
-        # Scale up for markets closer to resolution (stronger convergence)
-        time_factor = max(0.20, 1.0 - hours_to_res / config.resolution_hours_max)
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         notional = min(
             config.max_position_notional,
-            available_cash * config.kelly_fraction * kelly * mid_factor * time_factor,
+            available_cash * config.kelly_fraction * kelly * mid_factor,
         )
         if notional <= 0:
             return []
