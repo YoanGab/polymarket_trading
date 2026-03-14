@@ -550,7 +550,24 @@ class StrategyEngine:
             return []
 
         if position is not None and position.quantity > 0:
-            # Pure hold-to-resolution: no early exits
+            # Take profit if market moved strongly in our favor
+            unrealized_bps = (market.best_bid - position.avg_entry_price) * 10_000.0
+            if unrealized_bps > 2000:
+                return [
+                    OrderIntent(
+                        strategy_name=config.name,
+                        market_id=market.market_id,
+                        ts=market.ts,
+                        side="sell",
+                        liquidity_intent="aggressive",
+                        limit_price=market.best_bid,
+                        requested_quantity=position.quantity,
+                        kelly_fraction=config.kelly_fraction,
+                        edge_bps=unrealized_bps,
+                        holding_period_minutes=0,
+                        thesis="Profit target: unrealized gain > 2000bps",
+                    ),
+                ]
             return []
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
