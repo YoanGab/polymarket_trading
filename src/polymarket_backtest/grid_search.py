@@ -41,7 +41,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
-        # Near-term resolution: short window, moderate edge, narrower range
+        # Near-term resolution: short window, moderate edge
         StrategyConfig(
             name="resolution_nearterm",
             family="resolution_convergence",
@@ -51,8 +51,8 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             max_holding_minutes=None,
             resolution_hours_max=168.0,
             min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.75,
+            extreme_low=0.20,
+            extreme_high=0.80,
             **shared,
         ),
         # Core mid-range: catch medium-edge trades in the safe zone
