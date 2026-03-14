@@ -428,21 +428,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # Ultra conviction: extremely confident predictions near resolution
-        StrategyConfig(
-            name="ultra_conviction",
-            family="resolution_convergence",
-            kelly_fraction=1.00,
-            edge_threshold_bps=50.0,
-            max_position_notional=3500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.85,
-            extreme_low=0.15,
-            extreme_high=0.95,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
