@@ -570,16 +570,12 @@ class StrategyEngine:
             return []
 
         # Scale down for edge-of-range markets (further from 0.50 = less confident)
-        # Skip penalty for configs entirely above 0.50 (highodds) — distance from 0.50 is meaningless
-        if mid_low >= 0.60:
+        half_range = max(0.01, (mid_high - mid_low) / 2.0)
+        mid_distance = abs(market.mid - 0.50) / half_range
+        if mid_distance < 0.5:
             mid_factor = 1.0
         else:
-            half_range = max(0.01, (mid_high - mid_low) / 2.0)
-            mid_distance = abs(market.mid - 0.50) / half_range
-            if mid_distance < 0.5:
-                mid_factor = 1.0
-            else:
-                mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
+            mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
         kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         confidence_factor = min(3.0, max(0.5, (forecast.confidence - 0.55) * 10.0))
         notional = min(
