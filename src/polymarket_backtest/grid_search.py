@@ -293,6 +293,19 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
+        # Edge-based with 1-week time stop: trades ANY market with high edge
+        StrategyConfig(
+            name="edge_short_hold",
+            family="edge_based",
+            kelly_fraction=0.30,
+            edge_threshold_bps=500.0,
+            max_position_notional=1000.0,
+            max_holding_minutes=10080,
+            use_time_stop=True,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.08,
+            min_confidence=0.65,
+        ),
     ]
 
 
