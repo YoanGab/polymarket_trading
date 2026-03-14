@@ -323,21 +323,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # Lowodds core: underdogs with tight upper bound, high kelly
-        StrategyConfig(
-            name="lowodds_core",
-            family="resolution_convergence",
-            kelly_fraction=0.50,
-            edge_threshold_bps=500.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.65,
-            extreme_low=0.15,
-            extreme_high=0.60,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
