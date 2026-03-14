@@ -550,24 +550,7 @@ class StrategyEngine:
             return []
 
         if position is not None and position.quantity > 0:
-            # Near resolution, hold to resolution unless forecast flipped
-            # relative to entry price
-            if forecast.probability_yes < 0.5 and position.avg_entry_price > 0.5:
-                return [
-                    OrderIntent(
-                        strategy_name=config.name,
-                        market_id=market.market_id,
-                        ts=market.ts,
-                        side="sell",
-                        liquidity_intent="aggressive",
-                        limit_price=market.best_bid,
-                        requested_quantity=position.quantity,
-                        kelly_fraction=config.kelly_fraction,
-                        edge_bps=(market.best_bid - position.avg_entry_price) * 10_000.0,
-                        holding_period_minutes=0,
-                        thesis="Resolution convergence exit: forecast flipped",
-                    ),
-                ]
+            # Pure hold-to-resolution: no early exits
             return []
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
