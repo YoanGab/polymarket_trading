@@ -443,6 +443,21 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.12,
         ),
+        # Tight center: most uncertain markets (0.40-0.60 mid) where model edge is largest
+        StrategyConfig(
+            name="tight_center",
+            family="resolution_convergence",
+            kelly_fraction=1.00,
+            edge_threshold_bps=10.0,
+            max_position_notional=3500.0,
+            max_holding_minutes=None,
+            resolution_hours_max=720.0,
+            min_confidence=0.65,
+            extreme_low=0.40,
+            extreme_high=0.60,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+        ),
         # Ultra-short: 3-day window, moderate edge
         StrategyConfig(
             name="resolution_72h",
