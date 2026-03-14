@@ -448,7 +448,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             name="conviction_wide",
             family="resolution_convergence",
             kelly_fraction=0.50,
-            edge_threshold_bps=300.0,
+            edge_threshold_bps=200.0,
             max_position_notional=1500.0,
             max_holding_minutes=None,
             resolution_hours_max=720.0,
