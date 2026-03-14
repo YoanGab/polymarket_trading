@@ -69,6 +69,20 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.80,
             **shared,
         ),
+        # Long-term: 60-day window, high edge requirement
+        StrategyConfig(
+            name="resolution_longterm",
+            family="resolution_convergence",
+            kelly_fraction=0.25,
+            edge_threshold_bps=700.0,
+            max_position_notional=1000.0,
+            max_holding_minutes=None,
+            resolution_hours_max=1440.0,
+            min_confidence=0.65,
+            extreme_low=0.25,
+            extreme_high=0.75,
+            **shared,
+        ),
         # Core mid-range: catch medium-edge trades in the safe zone
         StrategyConfig(
             name="resolution_core",
