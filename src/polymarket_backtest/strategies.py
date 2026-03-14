@@ -12,7 +12,7 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-MIN_ORDER_QUANTITY = 10.0
+MIN_ORDER_QUANTITY = 5.0
 
 
 def estimated_fee_bps(price: float, fee_rate: float = 0.02) -> float:
