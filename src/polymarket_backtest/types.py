@@ -155,6 +155,8 @@ class StrategyConfig:
     carry_exit_threshold: float = 0.05
     # Generic exit: take profit after realizing this share of the max possible gain
     profit_target_pct: float = 0.0
+    # Generic exit: fraction of the open position to sell when an exit triggers
+    exit_fraction: float = 1.0
     # Generic exit: close positions older than this many hours
     time_exit_hours: float = 0.0
     # Capital management: max share of current cash to deploy into one position
@@ -183,6 +185,8 @@ class StrategyConfig:
             raise ValueError(f"max_position_notional must be > 0, got {self.max_position_notional}")
         if self.profit_target_pct < 0:
             raise ValueError(f"profit_target_pct must be >= 0, got {self.profit_target_pct}")
+        if not (0.0 < self.exit_fraction <= 1.0):
+            raise ValueError(f"exit_fraction must be in (0, 1], got {self.exit_fraction}")
         if self.time_exit_hours < 0:
             raise ValueError(f"time_exit_hours must be >= 0, got {self.time_exit_hours}")
         if not (0.0 < self.max_portfolio_pct <= 1.0):

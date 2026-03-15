@@ -402,6 +402,49 @@ def test_should_exit_uses_profit_target_for_no_positions() -> None:
     assert should_exit is True
 
 
+def test_exit_order_uses_partial_exit_fraction_after_profit_target() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="partial_profit_target",
+        family="edge_based",
+        kelly_fraction=0.1,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+        profit_target_pct=0.5,
+        exit_fraction=0.5,
+    )
+    market = _make_market_state(best_bid=0.74, best_ask=0.76)
+    forecast = _make_forecast(probability_yes=0.80, confidence=0.8)
+    position = PositionState(
+        strategy_name=config.name,
+        market_id=market.market_id,
+        quantity=10.0,
+        avg_entry_price=0.50,
+        total_opened_quantity=10.0,
+        total_opened_notional=5.0,
+        opened_ts=market.ts - timedelta(hours=1),
+        entry_probability=0.70,
+        thesis="Take partial profits",
+    )
+
+    assert engine.should_exit(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=position,
+    )
+
+    exit_order = engine.exit_order(
+        config=config,
+        market=market,
+        position=position,
+    )
+
+    assert exit_order.requested_quantity == pytest.approx(5.0)
+    assert exit_order.limit_price == pytest.approx(market.best_bid)
+
+
 def test_available_cash_for_entries_respects_remaining_investable_cap() -> None:
     engine = object.__new__(ReplayEngine)
     engine.config = ReplayConfig(experiment_name="test", starting_cash=1_000.0, lookback_minutes=60)

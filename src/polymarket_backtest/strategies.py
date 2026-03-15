@@ -249,6 +249,7 @@ class StrategyEngine:
         position: PositionState,
     ) -> OrderIntent:
         exit_price = no_bid_price(market) if position.is_no_bet else market.best_bid
+        sell_quantity = position.quantity * config.exit_fraction
         return OrderIntent(
             strategy_name=config.name,
             market_id=market.market_id,
@@ -256,7 +257,7 @@ class StrategyEngine:
             side="sell",
             liquidity_intent="aggressive",
             limit_price=exit_price,
-            requested_quantity=position.quantity,
+            requested_quantity=sell_quantity,
             kelly_fraction=config.kelly_fraction,
             edge_bps=0.0,
             holding_period_minutes=0,

@@ -257,6 +257,36 @@ def test_ml_transport_uses_prev_snapshots_for_history_features() -> None:
     assert captured["price_range_24h"] == pytest.approx(0.23)
 
 
+def test_market_simulator_passive_fill_earns_maker_rebate_by_default() -> None:
+    simulator = MarketSimulator()
+    market = _make_market_state(datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+    intent = OrderIntent(
+        strategy_name="rebate-test",
+        market_id=market.market_id,
+        ts=market.ts,
+        side="buy",
+        liquidity_intent="passive",
+        limit_price=0.50,
+        requested_quantity=10.0,
+        kelly_fraction=0.1,
+        edge_bps=100.0,
+        holding_period_minutes=60,
+        thesis="Capture maker rebate",
+    )
+
+    fills = simulator.simulate(
+        order_id="order-1",
+        market=market,
+        next_market=None,
+        intent=intent,
+    )
+
+    assert len(fills) == 1
+    assert fills[0].liquidity_role == "maker"
+    assert fills[0].rebate_usdc == pytest.approx(0.001)
+    assert fills[0].fee_usdc == pytest.approx(0.0)
+
+
 def test_ml_transport_confidence_uses_tradable_edge() -> None:
     transport = object.__new__(MLModelTransport)
     transport.agent_name = "ml_model"

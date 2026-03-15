@@ -62,7 +62,7 @@ class MarketSimulator:
     passive_queue_ahead_ratio: float = 0.5
     passive_flow_capture_rate: float = 0.35
     empty_book_impact_multiplier: float = 2.5
-    maker_rebate_eligible: bool = False
+    maker_rebate_eligible: bool = True
 
     def simulate(
         self,
@@ -88,6 +88,13 @@ class MarketSimulator:
         # - Sports (NCAAB, Serie A): 0.0175% fee_rate
         # - Settlement: NO fees on resolution winnings
         # The DB values (fees_enabled, fee_rate) are correct per-market.
+        taker_fee_equivalent_usdc = PolymarketFeeModel.taker_fee_usdc(
+            price=estimate.vwap_price,
+            quantity=estimate.quantity,
+            fees_enabled=effective_market.fees_enabled,
+            fee_rate=effective_market.fee_rate,
+            exponent=effective_market.fee_exponent,
+        )
         fee_usdc = (
             PolymarketFeeModel.taker_fee_usdc(
                 price=estimate.vwap_price,
@@ -101,7 +108,7 @@ class MarketSimulator:
         )
         rebate_usdc = (
             PolymarketFeeModel.maker_rebate_usdc(
-                taker_fee_usdc=fee_usdc,
+                taker_fee_usdc=taker_fee_equivalent_usdc,
                 maker_rebate_rate=effective_market.maker_rebate_rate,
                 eligible=self.maker_rebate_eligible,
             )
