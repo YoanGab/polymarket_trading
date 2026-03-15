@@ -44,7 +44,7 @@ def _make_transport_factory(mode: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate strategies via grid search")
-    parser.add_argument("--max-markets", type=int, default=100, help="Max markets to use (default: 100)")
+    parser.add_argument("--max-markets", type=int, default=0, help="Max markets (0 = ALL markets in split)")
     parser.add_argument(
         "--forecast-mode",
         choices=["deterministic", "smart_rules", "ml_model"],

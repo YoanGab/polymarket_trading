@@ -77,10 +77,9 @@ The environment exposes **raw data** — the agent decides what features to extr
 ```bash
 # 1. TRAIN on train split
 uv run python scripts/train_model.py --model xgboost > run.log 2>&1
-# (uses data/prepared/train.npz automatically)
 
-# 2. EVALUATE on val split (frozen model)
-uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 100 --split val > eval.log 2>&1
+# 2. EVALUATE on val split (ALL val markets, frozen model)
+uv run python scripts/eval_strategies.py --forecast-mode ml_model --split val > eval.log 2>&1
 
 # 3. Read metrics
 grep "RESULT\|TEST_BRIER" run.log
@@ -91,21 +90,19 @@ grep "BEST_STRATEGY\|SHARPE\|PNL\|TRADES" eval.log
 
 ```bash
 # 1. TRAIN on train markets (the agent plays and learns)
-uv run python scripts/train_rl.py --split train --episodes 500 > run.log 2>&1
+uv run python scripts/train_rl.py --split train > run.log 2>&1
 
 # 2. EVALUATE on val markets (frozen policy, no learning)
-uv run python scripts/train_rl.py --split val --episodes 100 --eval-only > eval.log 2>&1
+uv run python scripts/train_rl.py --split val --eval-only > eval.log 2>&1
 
 # 3. Read metrics
 grep "RESULT\|EPISODE_RETURN\|SHARPE" run.log
 grep "EVAL\|SHARPE\|TRADES" eval.log
 ```
 
-**Two gym environments available** (you choose):
-- `PolymarketGymEnv` — single market per episode, Discrete(12) actions. Simple, good for starting.
-- `PolymarketMultiMarketGymEnv` — N markets simultaneous, shared cash, MultiDiscrete actions. More realistic, 1700 episodes/min after 96s init.
+**Gym environment**: `PolymarketMultiMarketGymEnv` — N markets simultaneous, shared cash, MultiDiscrete actions. 1700 episodes/min after 96s init. This is the realistic environment.
 
-The train_rl.py currently uses single-market. You can switch to multi-market if you think it's better.
+**Time budget**: Each experiment (train + eval) should complete within ~10 minutes wall clock. If it exceeds 15 minutes, kill it and log crash. The training script should stop by time, not by episode count.
 
 **The RL agent must train on train markets and be evaluated on val markets.** The `--split` flag controls which markets are used. `--eval-only` freezes the policy (no gradient updates).
 

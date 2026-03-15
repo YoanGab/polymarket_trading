@@ -193,12 +193,13 @@ class DQNAgent:
 
 
 def train(
-    n_episodes: int = 500,
+    n_episodes: int = 100_000,
     max_steps: int = 500,
-    max_markets: int = 500,
+    max_markets: int = 0,
     eval_every: int = 50,
     split: str = "train",
     eval_only: bool = False,
+    timeout_seconds: int = 300,
 ):
     env = make_env(max_markets=max_markets, split=split)
 
@@ -215,6 +216,9 @@ def train(
     start = time.monotonic()
 
     for ep in range(n_episodes):
+        if time.monotonic() - start > timeout_seconds:
+            print(f"Timeout after {ep} episodes ({timeout_seconds}s)", flush=True)
+            break
         obs, _ = env.reset()
         ep_return = 0.0
         ep_trades = 0
@@ -281,10 +285,13 @@ def train(
 
 def main():
     parser = argparse.ArgumentParser(description="Train RL agent")
-    parser.add_argument("--episodes", type=int, default=500)
+    parser.add_argument("--episodes", type=int, default=0, help="Max episodes (0 = run until timeout)")
+    parser.add_argument(
+        "--timeout", type=int, default=300, help="Training time budget in seconds (default: 300 = 5 min)"
+    )
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument(
-        "--max-markets", type=int, default=0, help="Max markets to pre-select (0 = ALL markets in split, recommended)"
+        "--max-markets", type=int, default=0, help="Max markets to pre-select (0 = ALL markets in split)"
     )
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument(
@@ -294,12 +301,13 @@ def main():
     args = parser.parse_args()
 
     train(
-        n_episodes=args.episodes,
+        n_episodes=args.episodes if args.episodes > 0 else 100_000,
         max_steps=args.max_steps,
         max_markets=args.max_markets,
         eval_every=args.eval_every,
         split=args.split,
         eval_only=args.eval_only,
+        timeout_seconds=args.timeout,
     )
 
 
