@@ -112,7 +112,7 @@ def main() -> None:
     start = time.monotonic()
     results = run_grid_search(
         DB_PATH,
-        max_markets=args.max_markets,
+        max_markets=args.max_markets or None,
         transport_factory=transport_factory,
         exclude_categories=args.exclude_category,
         in_memory=not args.no_in_memory,
