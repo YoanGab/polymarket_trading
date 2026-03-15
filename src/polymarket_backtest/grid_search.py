@@ -263,6 +263,19 @@ def run_grid_search(
             market_ids = _filter_market_ids_by_categories(all_ids, market_categories, exclude_categories)
             print(f"  Category filter: {len(all_ids)} → {len(market_ids)} markets (excluded {set(exclude_categories)})")
 
+        # Volume filter: skip illiquid markets (volume_24h < 50000)
+        if market_ids is not None:
+            liquid_ids = []
+            for mid in market_ids:
+                row = conn.execute(
+                    "SELECT MAX(volume_24h) as max_vol FROM market_snapshots WHERE market_id = ?", (mid,)
+                ).fetchone()
+                if row and float(row["max_vol"] or 0) >= 50000:
+                    liquid_ids.append(mid)
+            if len(liquid_ids) < len(market_ids):
+                print(f"  Volume filter: {len(market_ids)} → {len(liquid_ids)} markets (min 50K volume)")
+            market_ids = liquid_ids
+
         # Use parallel path when requested and we have market_ids
         if use_parallel and market_ids is not None and len(market_ids) > 1:
             from .parallel_eval import run_parallel_grid_search

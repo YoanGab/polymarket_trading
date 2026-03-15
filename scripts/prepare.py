@@ -129,6 +129,12 @@ def build_and_split(
             skipped_too_few += 1
             return
 
+        # Min volume filter: skip illiquid markets (human-approved)
+        max_vol = max(float(r["volume_24h"]) for r in rows)
+        if max_vol < 50000:
+            skipped_too_few += 1
+            return
+
         resolved_outcome = resolutions[market_id]
 
         # Determine split by last snapshot timestamp
