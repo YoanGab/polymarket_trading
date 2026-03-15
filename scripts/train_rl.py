@@ -43,12 +43,10 @@ def make_env(max_markets: int = 100, split: str = "val"):
         "test": f"m.resolution_ts >= '{VAL_CUTOFF}'",
     }
     filt = split_filter.get(split, split_filter["val"])
-    rows = conn.execute(
-        f"SELECT m.market_id FROM markets m "
-        f"JOIN market_resolutions mr ON mr.market_id = m.market_id "
-        f"WHERE {filt} ORDER BY RANDOM() LIMIT ?",
-        (max_markets,),
-    ).fetchall()
+    query = f"SELECT m.market_id FROM markets m JOIN market_resolutions mr ON mr.market_id = m.market_id WHERE {filt}"
+    if max_markets > 0:
+        query += f" ORDER BY RANDOM() LIMIT {max_markets}"
+    rows = conn.execute(query).fetchall()
     conn.close()
     market_ids = [str(r["market_id"]) for r in rows]
 
@@ -285,7 +283,9 @@ def main():
     parser = argparse.ArgumentParser(description="Train RL agent")
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--max-steps", type=int, default=500)
-    parser.add_argument("--max-markets", type=int, default=500)
+    parser.add_argument(
+        "--max-markets", type=int, default=0, help="Max markets to pre-select (0 = ALL markets in split, recommended)"
+    )
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument(
         "--split", default="train", help="Split to use: 'train' for training, 'val' for evaluation (default: train)"
