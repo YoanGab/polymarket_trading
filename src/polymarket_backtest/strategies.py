@@ -1,6 +1,8 @@
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from .market_categories import has_any_category
 from .types import (
     ForecastOutput,
     MarketState,
@@ -13,6 +15,59 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 MIN_ORDER_QUANTITY = 1.0
+
+
+def _apply_volume_cap(quantity: float, config: StrategyConfig, market: MarketState) -> float:
+    """Cap requested quantity based on market volume when volume_sizing is enabled."""
+    if not config.volume_sizing or market.volume_24h <= 0:
+        return quantity
+    max_quantity = market.volume_24h * config.volume_sizing_fraction
+    return min(quantity, max_quantity)
+
+
+def _pyramid_quantity(
+    *,
+    config: StrategyConfig,
+    market: MarketState,
+    position: PositionState,
+    net_edge_bps: float,
+    ask_price: float,
+    available_cash: float,
+    forecast_probability: float,
+) -> float:
+    """Compute add-on quantity for pyramiding into a profitable position.
+
+    Returns 0.0 if pyramiding conditions are not met.
+    """
+    if not config.allow_pyramiding:
+        return 0.0
+    # Position must be profitable
+    mark = position_mark_price(market, position)
+    if mark <= position.avg_entry_price:
+        return 0.0
+    # Edge must still be positive and above threshold
+    if net_edge_bps < config.edge_threshold_bps:
+        return 0.0
+    # Remaining room under max_position_notional
+    current_notional = position.quantity * position.avg_entry_price
+    remaining_notional = config.max_position_notional - current_notional
+    if remaining_notional <= 0:
+        return 0.0
+    # Scale the add-on by remaining edge (smaller adds as position grows)
+    edge_ratio = net_edge_bps / max(config.edge_threshold_bps, 1.0)
+    scale = min(1.0, edge_ratio * 0.5)  # at 2x threshold, add full remaining
+    kelly = kelly_fraction_for_probability(ask_price, forecast_probability)
+    add_notional = min(
+        remaining_notional * scale,
+        available_cash * config.kelly_fraction * kelly,
+    )
+    if add_notional <= 0:
+        return 0.0
+    qty = add_notional / ask_price
+    qty = _apply_volume_cap(qty, config, market)
+    if qty < MIN_ORDER_QUANTITY:
+        return 0.0
+    return qty
 
 
 def normalized_contract_price(price: float) -> float:
@@ -61,6 +116,11 @@ def position_mark_price(market: MarketState, position: PositionState) -> float:
 
 @dataclass
 class StrategyEngine:
+    def _market_category_allowed(self, config: StrategyConfig, market: MarketState) -> bool:
+        if config.allowed_categories and not has_any_category(market.tags, config.allowed_categories):
+            return False
+        return not (config.blocked_categories and has_any_category(market.tags, config.blocked_categories))
+
     def decide(
         self,
         *,
@@ -69,14 +129,32 @@ class StrategyEngine:
         forecast: ForecastOutput,
         position: PositionState | None,
         available_cash: float,
+        portfolio_cash: float | None = None,
+        starting_cash: float | None = None,
+        total_invested: float | None = None,
+        on_missed_trade: Callable[[float, str], None] | None = None,
     ) -> list[OrderIntent]:
         if market.status not in {"active", "open"}:
+            return []
+        if not self._market_category_allowed(config, market):
             return []
         orders: list[OrderIntent] = []
         if config.family == "carry_only":
             orders.extend(self._carry_only(config, market, forecast, position, available_cash))
         elif config.family in {"news_driven", "edge_based"}:
-            orders.extend(self._edge_based(config, market, forecast, position, available_cash))
+            orders.extend(
+                self._edge_based(
+                    config,
+                    market,
+                    forecast,
+                    position,
+                    available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    on_missed_trade=on_missed_trade,
+                )
+            )
         elif config.family == "mean_reversion":
             orders.extend(self._mean_reversion(config, market, forecast, position, available_cash))
         elif config.family == "contrarian":
@@ -86,8 +164,49 @@ class StrategyEngine:
         elif config.family == "volume_breakout":
             orders.extend(self._volume_breakout(config, market, forecast, position, available_cash))
         elif config.family == "resolution_convergence":
-            orders.extend(self._resolution_convergence(config, market, forecast, position, available_cash))
+            orders.extend(
+                self._resolution_convergence(
+                    config,
+                    market,
+                    forecast,
+                    position,
+                    available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    on_missed_trade=on_missed_trade,
+                )
+            )
         return orders
+
+    def _entry_cash_cap(
+        self,
+        *,
+        config: StrategyConfig,
+        available_cash: float,
+        portfolio_cash: float | None,
+        starting_cash: float | None,
+        total_invested: float | None,
+        edge_bps: float,
+        on_missed_trade: Callable[[float, str], None] | None,
+    ) -> float:
+        effective_available_cash = max(0.0, available_cash)
+        effective_portfolio_cash = max(0.0, portfolio_cash if portfolio_cash is not None else effective_available_cash)
+        if starting_cash is not None:
+            invested_cap = starting_cash * config.max_total_invested_pct
+            effective_total_invested = max(
+                0.0,
+                total_invested if total_invested is not None else starting_cash - effective_portfolio_cash,
+            )
+            if effective_total_invested > invested_cap:
+                if on_missed_trade is not None:
+                    on_missed_trade(edge_bps, "max_total_invested_pct")
+                return 0.0
+
+        per_position_cash = min(effective_available_cash, effective_portfolio_cash * config.max_portfolio_pct)
+        if per_position_cash <= 0.0 and on_missed_trade is not None:
+            on_missed_trade(edge_bps, "max_portfolio_pct")
+        return per_position_cash
 
     def should_exit(
         self,
@@ -170,7 +289,7 @@ class StrategyEngine:
             )
             if notional <= 0:
                 return []
-            quantity = notional / ask_price
+            quantity = _apply_volume_cap(notional / ask_price, config, market)
             if quantity < MIN_ORDER_QUANTITY:
                 return []
             return [
@@ -213,6 +332,11 @@ class StrategyEngine:
         forecast: ForecastOutput,
         position: PositionState | None,
         available_cash: float,
+        *,
+        portfolio_cash: float | None = None,
+        starting_cash: float | None = None,
+        total_invested: float | None = None,
+        on_missed_trade: Callable[[float, str], None] | None = None,
     ) -> list[OrderIntent]:
         ask_price = normalized_ask_price(market.best_ask)
         if forecast.confidence < config.min_confidence:
@@ -223,11 +347,22 @@ class StrategyEngine:
             fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
             net_edge_bps = edge_bps - fee_bps
             if net_edge_bps >= config.edge_threshold_bps:
+                per_position_cash = self._entry_cash_cap(
+                    config=config,
+                    available_cash=available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    edge_bps=net_edge_bps,
+                    on_missed_trade=on_missed_trade,
+                )
+                if per_position_cash <= 0:
+                    return []
                 kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
-                notional = min(config.max_position_notional, available_cash * config.kelly_fraction * kelly)
+                notional = min(config.max_position_notional, per_position_cash * config.kelly_fraction * kelly)
                 if notional <= 0:
                     return []
-                quantity = notional / ask_price
+                quantity = _apply_volume_cap(notional / ask_price, config, market)
                 if quantity < MIN_ORDER_QUANTITY:
                     return []
                 return [
@@ -324,7 +459,7 @@ class StrategyEngine:
         notional = min(config.max_position_notional, available_cash * config.kelly_fraction * kelly)
         if notional <= 0:
             return []
-        quantity = notional / ask_price
+        quantity = _apply_volume_cap(notional / ask_price, config, market)
         if quantity < MIN_ORDER_QUANTITY:
             return []
         return [
@@ -393,7 +528,7 @@ class StrategyEngine:
             notional = min(config.max_position_notional, available_cash * config.kelly_fraction * kelly)
             if notional <= 0:
                 return []
-            quantity = notional / ask_price
+            quantity = _apply_volume_cap(notional / ask_price, config, market)
             if quantity < MIN_ORDER_QUANTITY:
                 return []
             return [
@@ -469,7 +604,7 @@ class StrategyEngine:
         notional = min(config.max_position_notional, available_cash * config.kelly_fraction * kelly)
         if notional <= 0:
             return []
-        quantity = notional / ask_price
+        quantity = _apply_volume_cap(notional / ask_price, config, market)
         if quantity < MIN_ORDER_QUANTITY:
             return []
         return [
@@ -547,7 +682,7 @@ class StrategyEngine:
         notional = min(config.max_position_notional, available_cash * config.kelly_fraction * kelly)
         if notional <= 0:
             return []
-        quantity = notional / ask_price
+        quantity = _apply_volume_cap(notional / ask_price, config, market)
         if quantity < MIN_ORDER_QUANTITY:
             return []
         return [
@@ -573,6 +708,11 @@ class StrategyEngine:
         forecast: ForecastOutput,
         position: PositionState | None,
         available_cash: float,
+        *,
+        portfolio_cash: float | None = None,
+        starting_cash: float | None = None,
+        total_invested: float | None = None,
+        on_missed_trade: Callable[[float, str], None] | None = None,
     ) -> list[OrderIntent]:
         """Exploit uncertainty in mid-range markets near resolution.
 
@@ -589,8 +729,11 @@ class StrategyEngine:
             return []
 
         if position is not None and position.quantity > 0:
-            # Generic exits run before decide(); don't add to an existing position here.
-            return []
+            # Allow pyramiding if configured; otherwise hold
+            if not config.allow_pyramiding:
+                return []
+            # Fall through to entry logic -- pyramid_quantity will gate the add-on
+            pass
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
         mid_low = config.extreme_low
@@ -615,32 +758,53 @@ class StrategyEngine:
         fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
         net_edge_bps = edge_bps - fee_bps
         if net_edge_bps >= config.edge_threshold_bps:
-            kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
-            notional = min(
-                config.max_position_notional,
-                available_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
+            per_position_cash = self._entry_cash_cap(
+                config=config,
+                available_cash=available_cash,
+                portfolio_cash=portfolio_cash,
+                starting_cash=starting_cash,
+                total_invested=total_invested,
+                edge_bps=net_edge_bps,
+                on_missed_trade=on_missed_trade,
             )
-            if notional > 0:
-                quantity = notional / ask_price
-                if quantity >= MIN_ORDER_QUANTITY:
-                    return [
-                        OrderIntent(
-                            strategy_name=config.name,
-                            market_id=market.market_id,
-                            ts=market.ts,
-                            side="buy",
-                            liquidity_intent="aggressive",
-                            limit_price=ask_price,
-                            requested_quantity=quantity,
-                            kelly_fraction=config.kelly_fraction,
-                            edge_bps=net_edge_bps,
-                            holding_period_minutes=int(hours_to_res * 60),
-                            thesis=(
-                                f"Resolution convergence: {hours_to_res:.0f}h to resolution, "
-                                f"mid={market.mid:.2f}"
-                            ),
-                        ),
-                    ]
+            if per_position_cash <= 0:
+                return []
+            if position is not None and position.quantity > 0:
+                # Pyramiding: add to existing profitable position
+                quantity = _pyramid_quantity(
+                    config=config,
+                    market=market,
+                    position=position,
+                    net_edge_bps=net_edge_bps,
+                    ask_price=ask_price,
+                    available_cash=per_position_cash,
+                    forecast_probability=forecast.probability_yes,
+                )
+            else:
+                kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
+                notional = min(
+                    config.max_position_notional,
+                    per_position_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
+                )
+                quantity = notional / ask_price if notional > 0 else 0.0
+            quantity = _apply_volume_cap(quantity, config, market)
+            if quantity >= MIN_ORDER_QUANTITY:
+                label = "Pyramid add" if (position is not None and position.quantity > 0) else "Resolution convergence"
+                return [
+                    OrderIntent(
+                        strategy_name=config.name,
+                        market_id=market.market_id,
+                        ts=market.ts,
+                        side="buy",
+                        liquidity_intent="aggressive",
+                        limit_price=ask_price,
+                        requested_quantity=quantity,
+                        kelly_fraction=config.kelly_fraction,
+                        edge_bps=net_edge_bps,
+                        holding_period_minutes=int(hours_to_res * 60),
+                        thesis=(f"{label}: {hours_to_res:.0f}h to resolution, mid={market.mid:.2f}"),
+                    ),
+                ]
 
         no_price = no_ask_price(market)
         no_edge_bps = (market.best_bid - forecast.probability_yes) * 10_000.0
@@ -649,17 +813,40 @@ class StrategyEngine:
         if net_no_edge < config.edge_threshold_bps:
             return []
 
-        probability_no = 1.0 - forecast.probability_yes
-        kelly_no = kelly_fraction_for_probability(no_price, probability_no)
-        notional_no = min(
-            config.max_position_notional,
-            available_cash * config.kelly_fraction * kelly_no * mid_factor * confidence_factor,
+        per_position_cash = self._entry_cash_cap(
+            config=config,
+            available_cash=available_cash,
+            portfolio_cash=portfolio_cash,
+            starting_cash=starting_cash,
+            total_invested=total_invested,
+            edge_bps=net_no_edge,
+            on_missed_trade=on_missed_trade,
         )
-        if notional_no <= 0:
+        if per_position_cash <= 0:
             return []
-        quantity_no = notional_no / no_price
+        probability_no = 1.0 - forecast.probability_yes
+        if position is not None and position.quantity > 0:
+            # Pyramiding NO side
+            quantity_no = _pyramid_quantity(
+                config=config,
+                market=market,
+                position=position,
+                net_edge_bps=net_no_edge,
+                ask_price=no_price,
+                available_cash=per_position_cash,
+                forecast_probability=probability_no,
+            )
+        else:
+            kelly_no = kelly_fraction_for_probability(no_price, probability_no)
+            notional_no = min(
+                config.max_position_notional,
+                per_position_cash * config.kelly_fraction * kelly_no * mid_factor * confidence_factor,
+            )
+            quantity_no = notional_no / no_price if notional_no > 0 else 0.0
+        quantity_no = _apply_volume_cap(quantity_no, config, market)
         if quantity_no < MIN_ORDER_QUANTITY:
             return []
+        label_no = "Pyramid add NO" if (position is not None and position.quantity > 0) else "Resolution convergence NO"
         return [
             OrderIntent(
                 strategy_name=config.name,
@@ -672,10 +859,7 @@ class StrategyEngine:
                 kelly_fraction=config.kelly_fraction,
                 edge_bps=net_no_edge,
                 holding_period_minutes=int(hours_to_res * 60),
-                thesis=(
-                    f"Resolution convergence NO: {hours_to_res:.0f}h to resolution, "
-                    f"mid={market.mid:.2f}"
-                ),
+                thesis=(f"{label_no}: {hours_to_res:.0f}h to resolution, mid={market.mid:.2f}"),
                 is_no_bet=True,
             ),
         ]

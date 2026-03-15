@@ -11,6 +11,7 @@ from typing import Any
 
 from . import db
 from .grok_replay import ReplayGrokClient
+from .market_categories import category_fee_settings, normalize_market_tags
 from .market_simulator import MarketSimulator, new_order_id
 from .strategies import StrategyEngine
 from .types import (
@@ -37,6 +38,8 @@ class StrategyPortfolio:
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_known_mids: dict[str, float] = field(default_factory=dict)
     realized_pnl: float = 0.0
+    missed_trades: int = 0
+    missed_edge_bps: float = 0.0
 
 
 @dataclass
@@ -45,6 +48,7 @@ class ReplayEngine:
     config: ReplayConfig
     grok: ReplayGrokClient
     strategies: list[StrategyConfig]
+    market_categories: dict[str, list[str]] = field(default_factory=dict)
     simulator: MarketSimulator = field(default_factory=MarketSimulator)
 
     def __post_init__(self) -> None:
@@ -52,6 +56,7 @@ class ReplayEngine:
             strategy.name: StrategyPortfolio(cash=self.config.starting_cash) for strategy in self.strategies
         }
         self.strategy_engine = StrategyEngine()
+        self._strategy_by_name = {strategy.name: strategy for strategy in self.strategies}
         self._resolution_cache: dict[str, sqlite3.Row | None] = {}
         self._market_cache: dict[tuple[str, str], MarketState] = {}
         self._history_by_market: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -326,6 +331,7 @@ class ReplayEngine:
                     maker_rebate_rate=float(meta["maker_rebate_rate"]),
                     orderbook=[],
                 )
+                state = self._apply_market_category_metadata(state)
                 self._market_cache[(market_id, ts_str)] = state
                 history_by_market.setdefault(market_id, []).append(
                     (
@@ -369,13 +375,27 @@ class ReplayEngine:
             self._resolution_cache[market_id] = db.get_resolution(self.conn, market_id)
         return self._resolution_cache[market_id]
 
+    def _apply_market_category_metadata(self, market: MarketState) -> MarketState:
+        market_categories = getattr(self, "market_categories", {})
+        tags = normalize_market_tags(market_categories.get(market.market_id, market.tags))
+        fees_enabled, fee_rate = category_fee_settings(tags)
+        return dc_replace(
+            market,
+            tags=tags,
+            fees_enabled=fees_enabled,
+            fee_rate=fee_rate,
+        )
+
     def _get_cached_market(self, market_id: str, timestamp: datetime) -> MarketState | None:
         """Look up a market state from cache, falling back to DB if needed."""
         ts_key = isoformat(timestamp)
         cached = self._market_cache.get((market_id, ts_key))
         if cached is not None:
             return cached
-        return db.get_market_state_as_of(self.conn, market_id, timestamp)
+        market = db.get_market_state_as_of(self.conn, market_id, timestamp)
+        if market is None:
+            return None
+        return self._apply_market_category_metadata(market)
 
     def _get_cached_next_market(self, market_id: str, timestamp: datetime) -> MarketState | None:
         """Look up the next market state from cache, falling back to DB if needed."""
@@ -390,7 +410,10 @@ class ReplayEngine:
         if (market_id, ts_key) in self._next_ts_cache and next_info is None:
             # Explicitly known to have no next snapshot
             return None
-        return db.get_next_market_state(self.conn, market_id, timestamp)
+        market = db.get_next_market_state(self.conn, market_id, timestamp)
+        if market is None:
+            return None
+        return self._apply_market_category_metadata(market)
 
     def _get_market_history(
         self,
@@ -493,7 +516,21 @@ class ReplayEngine:
                 market=market,
                 forecast=forecast,
                 position=portfolio.positions.get(market_id),
-                available_cash=portfolio.cash,
+                available_cash=self._available_cash_for_entries(portfolio, strategy),
+                portfolio_cash=portfolio.cash,
+                starting_cash=self.config.starting_cash,
+                total_invested=self._total_invested_capital(portfolio),
+                on_missed_trade=(
+                    lambda edge_bps, reason, *, _portfolio=portfolio, _market=market, _strategy=strategy:
+                    self._record_missed_trade(
+                        portfolio=_portfolio,
+                        strategy_name=_strategy.name,
+                        market_id=_market.market_id,
+                        ts=_market.ts,
+                        edge_bps=edge_bps,
+                        reason=reason,
+                    )
+                ),
             )
             for order in orders:
                 self._execute_order(
@@ -541,10 +578,50 @@ class ReplayEngine:
                 cash=portfolio.cash,
                 last_known_mids=dict(portfolio.last_known_mids),
                 realized_pnl=portfolio.realized_pnl,
+                missed_trades=portfolio.missed_trades,
+                missed_edge_bps=portfolio.missed_edge_bps,
                 positions={market_id: dc_replace(position) for market_id, position in portfolio.positions.items()},
             )
             for strategy_name, portfolio in self.portfolios.items()
         }
+
+    def _strategy_config(self, strategy_name: str) -> StrategyConfig | None:
+        if hasattr(self, "_strategy_by_name"):
+            return self._strategy_by_name.get(strategy_name)
+        for strategy in getattr(self, "strategies", []):
+            if strategy.name == strategy_name:
+                return strategy
+        return None
+
+    def _total_invested_capital(self, portfolio: StrategyPortfolio) -> float:
+        return max(0.0, self.config.starting_cash - portfolio.cash)
+
+    def _available_cash_for_entries(self, portfolio: StrategyPortfolio, strategy: StrategyConfig) -> float:
+        max_invested_capital = self.config.starting_cash * strategy.max_total_invested_pct
+        remaining_investable = max(0.0, max_invested_capital - self._total_invested_capital(portfolio))
+        return min(portfolio.cash, remaining_investable)
+
+    def _record_missed_trade(
+        self,
+        *,
+        portfolio: StrategyPortfolio,
+        strategy_name: str,
+        market_id: str,
+        ts: datetime,
+        edge_bps: float,
+        reason: str,
+    ) -> None:
+        portfolio.missed_trades += 1
+        portfolio.missed_edge_bps += max(0.0, edge_bps)
+        logger.info(
+            "Missed trade strategy=%s market_id=%s ts=%s reason=%s edge_bps=%.2f cash=%.4f",
+            strategy_name,
+            market_id,
+            isoformat(ts),
+            reason,
+            edge_bps,
+            portfolio.cash,
+        )
 
     def _normalize_quotes(self, market: MarketState) -> MarketState:
         """Clamp quotes to a valid range and preserve a positive spread."""
@@ -717,7 +794,39 @@ class ReplayEngine:
             else self.simulator._simulate_passive(effective_market, effective_execution_next_market, order)
         )
         estimated_notional = fill_estimate.vwap_price * fill_estimate.quantity
+        strategy = self._strategy_config(order.strategy_name)
+        if order.side == "buy" and strategy is not None:
+            reserve_cash = self.config.starting_cash * (1.0 - strategy.max_total_invested_pct)
+            low_edge_cutoff = strategy.edge_threshold_bps * 1.5
+            cash_after_fill = portfolio.cash - estimated_notional
+            if cash_after_fill < reserve_cash and order.edge_bps < low_edge_cutoff:
+                self._record_missed_trade(
+                    portfolio=portfolio,
+                    strategy_name=order.strategy_name,
+                    market_id=order.market_id,
+                    ts=order.ts,
+                    edge_bps=order.edge_bps,
+                    reason="cash_pressure_low_edge",
+                )
+                logger.warning(
+                    "Skipping buy order for strategy=%s market_id=%s at ts=%s because "
+                    "cash would fall below reserve %.4f on low edge %.2f bps",
+                    order.strategy_name,
+                    order.market_id,
+                    isoformat(order.ts),
+                    reserve_cash,
+                    order.edge_bps,
+                )
+                return
         if order.side == "buy" and estimated_notional > portfolio.cash:
+            self._record_missed_trade(
+                portfolio=portfolio,
+                strategy_name=order.strategy_name,
+                market_id=order.market_id,
+                ts=order.ts,
+                edge_bps=order.edge_bps,
+                reason="insufficient_cash",
+            )
             logger.warning(
                 "Skipping buy order for strategy=%s market_id=%s at ts=%s because "
                 "estimated notional %.4f exceeds cash %.4f",

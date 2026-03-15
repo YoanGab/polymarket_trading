@@ -1,4 +1,3 @@
-import json
 import os
 import random
 import sqlite3
@@ -8,12 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from . import db
-
-TAGS_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "market_tags.json"
 from .grok_replay import (
     DeterministicReplayTransport,
     ForecastTransport,
     ReplayGrokClient,
+)
+from .market_categories import (
+    CRYPTO_CATEGORY_TAGS,
+    FEE_BEARING_CATEGORY_TAGS,
+    SPORTS_CATEGORY_TAGS,
+    normalize_market_tags,
 )
 from .metrics import build_metrics_summary, persist_metric_results
 from .replay_engine import ReplayEngine
@@ -24,195 +27,172 @@ DEFAULT_MODEL_RELEASE = os.environ.get("GROK_MODEL_RELEASE", "grok-3")
 
 
 def expanded_strategy_grid() -> list[StrategyConfig]:
-    """Deduplicated strategy grid: 12 materially distinct configs.
+    """Category-routed strategy grid tuned to fee profile and time-to-resolution."""
+    fee_free_blocklist = list(FEE_BEARING_CATEGORY_TAGS)
+    crypto_only = list(CRYPTO_CATEGORY_TAGS)
+    sports_only = list(SPORTS_CATEGORY_TAGS)
 
-    Reduced from 29 configs by removing:
-    - Time-horizon gap-fillers that took identical trades (nearterm_extended,
-      resolution_medium, resolution_20d, core_medium, core_longterm,
-      core_ultralong)
-    - Conviction lowodds time variants (near/ext/med/long/ultra all shared
-      the same trades as the base conviction_lowodds)
-    - nearterm_core (subset of resolution_core)
-    - lowodds time variants (longterm/medium/extended/40d — redundant)
-    - highodds (superset of highodds_core)
-    - conviction_resolution (subset of high_conviction)
-    """
     return [
-        # 1. Main wide-range control: 30-day window, 500bps edge
+        # Fee-free political/event markets: wider horizons and larger sizing.
         StrategyConfig(
-            name="resolution_convergence",
+            name="political_event_wide",
             family="resolution_convergence",
             kelly_fraction=0.40,
-            edge_threshold_bps=500.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
-        # 2. Short-term: 7-day window, 150bps edge
-        StrategyConfig(
-            name="resolution_nearterm",
-            family="resolution_convergence",
-            kelly_fraction=0.30,
-            edge_threshold_bps=150.0,
-            max_position_notional=1000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=168.0,
-            min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.09,
-        ),
-        # 3. Ultra-short: 3-day window, 300bps edge
-        StrategyConfig(
-            name="resolution_72h",
-            family="resolution_convergence",
-            kelly_fraction=0.30,
-            edge_threshold_bps=300.0,
-            max_position_notional=1000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=72.0,
-            min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
-        # 4. Long-term: 60-day window, 700bps edge
-        StrategyConfig(
-            name="resolution_longterm",
-            family="resolution_convergence",
-            kelly_fraction=0.40,
-            edge_threshold_bps=700.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=1440.0,
-            min_confidence=0.65,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
-        # 5. Ultra-long: 90-day window, 1000bps edge
-        StrategyConfig(
-            name="resolution_ultralong",
-            family="resolution_convergence",
-            kelly_fraction=0.35,
-            edge_threshold_bps=1000.0,
+            edge_threshold_bps=200.0,
             max_position_notional=1500.0,
             max_holding_minutes=None,
             resolution_hours_max=2160.0,
             min_confidence=0.65,
             extreme_low=0.25,
-            extreme_high=0.75,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.12,
-        ),
-        # 6. Core mid-range: aggressive sizing on 0.30-0.70 markets
-        StrategyConfig(
-            name="resolution_core",
-            family="resolution_convergence",
-            kelly_fraction=1.00,
-            edge_threshold_bps=20.0,
-            max_position_notional=3500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.65,
-            extreme_low=0.30,
-            extreme_high=0.70,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
-        # 7. Core mega: mid-range at 6-month horizon, high edge
-        StrategyConfig(
-            name="core_mega",
-            family="resolution_convergence",
-            kelly_fraction=0.40,
-            edge_threshold_bps=500.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=4320.0,
-            min_confidence=0.65,
-            extreme_low=0.30,
-            extreme_high=0.70,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-        ),
-        # 8. Low-odds underdogs: 0.15-0.80 with high edge
-        StrategyConfig(
-            name="resolution_lowodds",
-            family="resolution_convergence",
-            kelly_fraction=0.30,
-            edge_threshold_bps=800.0,
-            max_position_notional=1000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.65,
-            extreme_low=0.15,
             extreme_high=0.80,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
+            blocked_categories=fee_free_blocklist,
         ),
-        # 9. Edge-based high conviction: high confidence + pure edge
         StrategyConfig(
-            name="edge_conviction",
+            name="political_event_core",
+            family="resolution_convergence",
+            kelly_fraction=0.80,
+            edge_threshold_bps=40.0,
+            max_position_notional=3000.0,
+            max_holding_minutes=None,
+            resolution_hours_max=720.0,
+            min_confidence=0.65,
+            extreme_low=0.30,
+            extreme_high=0.70,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+            blocked_categories=fee_free_blocklist,
+        ),
+        StrategyConfig(
+            name="political_event_conviction",
             family="edge_based",
-            kelly_fraction=0.40,
-            edge_threshold_bps=300.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=10080,
+            kelly_fraction=0.35,
+            edge_threshold_bps=250.0,
+            max_position_notional=1200.0,
+            max_holding_minutes=20160,
             min_confidence=0.75,
             use_thesis_stop=True,
-            thesis_stop_delta=0.12,
+            thesis_stop_delta=0.10,
             aggressive_entry=True,
+            blocked_categories=fee_free_blocklist,
         ),
-        # 10. High conviction: high confidence, wide range
+
+        # Crypto markets: shorter windows and higher edge requirements to absorb 25 bps fees.
         StrategyConfig(
-            name="high_conviction",
+            name="crypto_resolution_day",
             family="resolution_convergence",
-            kelly_fraction=1.00,
-            edge_threshold_bps=100.0,
-            max_position_notional=3500.0,
+            kelly_fraction=0.25,
+            edge_threshold_bps=200.0,
+            max_position_notional=900.0,
             max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.75,
-            extreme_low=0.25,
-            extreme_high=0.80,
+            resolution_hours_max=24.0,
+            min_confidence=0.72,
+            extreme_low=0.35,
+            extreme_high=0.65,
             use_thesis_stop=True,
-            thesis_stop_delta=0.12,
+            thesis_stop_delta=0.06,
+            allowed_categories=crypto_only,
         ),
-        # 11. Edge-based moderate: balanced edge + sizing
         StrategyConfig(
-            name="edge_moderate",
+            name="crypto_resolution_6h",
+            family="resolution_convergence",
+            kelly_fraction=0.20,
+            edge_threshold_bps=300.0,
+            max_position_notional=750.0,
+            max_holding_minutes=None,
+            resolution_hours_max=6.0,
+            min_confidence=0.74,
+            extreme_low=0.40,
+            extreme_high=0.60,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.05,
+            allowed_categories=crypto_only,
+        ),
+        StrategyConfig(
+            name="crypto_edge_fast",
             family="edge_based",
             kelly_fraction=0.20,
-            edge_threshold_bps=700.0,
-            max_position_notional=800.0,
-            max_holding_minutes=10080,
-            min_confidence=0.65,
+            edge_threshold_bps=225.0,
+            max_position_notional=700.0,
+            max_holding_minutes=240,
+            min_confidence=0.78,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.08,
             aggressive_entry=True,
+            allowed_categories=crypto_only,
         ),
-        # 12. Edge-based: pure forecast edge, no resolution context
+
+        # Sports markets: fast resolution and tighter exposure limits.
         StrategyConfig(
-            name="edge_based",
-            family="edge_based",
-            kelly_fraction=0.30,
-            edge_threshold_bps=500.0,
-            max_position_notional=1000.0,
-            max_holding_minutes=10080,
-            min_confidence=0.65,
+            name="sports_resolution_day",
+            family="resolution_convergence",
+            kelly_fraction=0.25,
+            edge_threshold_bps=90.0,
+            max_position_notional=800.0,
+            max_holding_minutes=None,
+            resolution_hours_max=24.0,
+            min_confidence=0.68,
+            extreme_low=0.35,
+            extreme_high=0.65,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.07,
+            allowed_categories=sports_only,
+        ),
+        StrategyConfig(
+            name="sports_resolution_6h",
+            family="resolution_convergence",
+            kelly_fraction=0.20,
+            edge_threshold_bps=140.0,
+            max_position_notional=700.0,
+            max_holding_minutes=None,
+            resolution_hours_max=6.0,
+            min_confidence=0.70,
+            extreme_low=0.40,
+            extreme_high=0.60,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.05,
+            allowed_categories=sports_only,
+        ),
+        StrategyConfig(
+            name="sports_edge_fast",
+            family="edge_based",
+            kelly_fraction=0.15,
+            edge_threshold_bps=120.0,
+            max_position_notional=600.0,
+            max_holding_minutes=180,
+            min_confidence=0.72,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.08,
             aggressive_entry=True,
+            allowed_categories=sports_only,
         ),
     ]
+
+
+def _load_market_categories(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    market_categories: dict[str, list[str]] = {}
+    rows = conn.execute(
+        """
+        SELECT me.market_id, GROUP_CONCAT(et.tag) AS tags
+        FROM market_events me
+        JOIN event_tags et ON et.event_id = me.event_id
+        GROUP BY me.market_id
+        """
+    ).fetchall()
+    for row in rows:
+        raw_tags = str(row["tags"]).split(",") if row["tags"] else []
+        market_categories[str(row["market_id"])] = normalize_market_tags(raw_tags)
+    return market_categories
+
+
+def _filter_market_ids_by_categories(
+    market_ids: list[str],
+    market_categories: dict[str, list[str]],
+    exclude_categories: list[str],
+) -> list[str]:
+    exclude_set = set(exclude_categories)
+    return [mid for mid in market_ids if not any(tag in exclude_set for tag in market_categories.get(mid, []))]
 
 
 def _stratified_market_sample(
@@ -385,6 +365,7 @@ def run_grid_search(
     conn = _open_execution_db(db_path, in_memory=in_memory)
     try:
         db.init_db(conn)
+        market_categories = _load_market_categories(conn)
 
         # Determine which market IDs to replay (stratified random sampling)
         market_ids: list[str] | None = None
@@ -394,33 +375,18 @@ def run_grid_search(
                 raise ValueError(f"No market data found in {db_path}")
 
         # Filter by category if requested
-        if exclude_categories and market_ids is not None and TAGS_PATH.exists():
-            with open(TAGS_PATH) as f:
-                market_tags = json.load(f)
-            exclude_set = set(exclude_categories)
+        if exclude_categories and market_ids is not None:
             before = len(market_ids)
-            market_ids = [
-                mid
-                for mid in market_ids
-                if (market_tags.get(mid, ["Unknown"])[0] if market_tags.get(mid) else "Unknown") not in exclude_set
-            ]
-            print(f"  Category filter: {before} → {len(market_ids)} markets (excluded {exclude_set})")
+            market_ids = _filter_market_ids_by_categories(market_ids, market_categories, exclude_categories)
+            print(f"  Category filter: {before} → {len(market_ids)} markets (excluded {set(exclude_categories)})")
         elif exclude_categories and market_ids is None:
             # Need to get all market IDs first to filter
             all_ids = [
                 str(row["market_id"])
                 for row in conn.execute("SELECT DISTINCT market_id FROM market_snapshots").fetchall()
             ]
-            if TAGS_PATH.exists():
-                with open(TAGS_PATH) as f:
-                    market_tags = json.load(f)
-                exclude_set = set(exclude_categories)
-                market_ids = [
-                    mid
-                    for mid in all_ids
-                    if (market_tags.get(mid, ["Unknown"])[0] if market_tags.get(mid) else "Unknown") not in exclude_set
-                ]
-                print(f"  Category filter: {len(all_ids)} → {len(market_ids)} markets (excluded {exclude_set})")
+            market_ids = _filter_market_ids_by_categories(all_ids, market_categories, exclude_categories)
+            print(f"  Category filter: {len(all_ids)} → {len(market_ids)} markets (excluded {set(exclude_categories)})")
 
         # Use parallel path when requested and we have market_ids
         if use_parallel and market_ids is not None and len(market_ids) > 1:
@@ -434,6 +400,7 @@ def run_grid_search(
                 starting_cash=starting_cash,
                 transport_mode=resolved_mode,
                 market_ids=market_ids,
+                market_categories=market_categories,
                 eval_stride=eval_stride,
                 n_workers=n_workers,
             )
@@ -445,6 +412,7 @@ def run_grid_search(
                 conn,
                 strategies=selected_strategies,
                 starting_cash=starting_cash,
+                market_categories=market_categories,
                 transport_factory=transport_factory,
                 market_ids=market_ids,
                 eval_stride=eval_stride,
@@ -633,6 +601,7 @@ def _run_all_strategies_experiment(
     skip_audit: bool = False,
     strategies: list[StrategyConfig],
     starting_cash: float,
+    market_categories: dict[str, list[str]] | None = None,
     transport_factory: Callable[[], ForecastTransport] | None = None,
     market_ids: list[str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -686,6 +655,7 @@ def _run_all_strategies_experiment(
         config=config,
         grok=grok,
         strategies=strategies,
+        market_categories=market_categories or {},
     )
     if market_ids is not None:
         engine.run_markets(market_ids)
@@ -701,6 +671,7 @@ def _run_strategy_experiment(
     strategy: StrategyConfig,
     replay_timestamps: list[datetime],
     starting_cash: float,
+    market_categories: dict[str, list[str]] | None = None,
     transport_factory: Callable[[], ForecastTransport] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     config = ReplayConfig(
@@ -740,6 +711,7 @@ def _run_strategy_experiment(
         config=config,
         grok=grok,
         strategies=[strategy],
+        market_categories=market_categories or {},
     )
     engine.run()
     persist_metric_results(conn, experiment_id, config.markout_horizons_min)

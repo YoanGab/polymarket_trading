@@ -72,6 +72,7 @@ class MarketState:
     fee_exponent: float
     maker_rebate_rate: float
     orderbook: list[OrderLevel]
+    tags: list[str] = field(default_factory=list)
 
     @property
     def visible_depth_ask(self) -> float:
@@ -156,6 +157,22 @@ class StrategyConfig:
     profit_target_pct: float = 0.0
     # Generic exit: close positions older than this many hours
     time_exit_hours: float = 0.0
+    # Capital management: max share of current cash to deploy into one position
+    max_portfolio_pct: float = 0.5
+    # Capital management: max share of starting cash allowed to remain invested
+    max_total_invested_pct: float = 0.8
+    # Volume sizing: cap position quantity to a fraction of 24h volume
+    volume_sizing: bool = False
+    # Volume sizing: max fraction of 24h volume for a single position
+    volume_sizing_fraction: float = 0.001
+    # Pyramiding: allow adding to profitable positions when edge persists
+    allow_pyramiding: bool = False
+    # Pyramiding: minimum edge improvement ratio to add (1.5 = edge must be 50% larger)
+    pyramid_edge_improvement: float = 1.5
+    # Category routing: None means all categories are eligible
+    allowed_categories: list[str] | None = None
+    # Category routing: None means no categories are blocked
+    blocked_categories: list[str] | None = None
 
     def __post_init__(self) -> None:
         if not (0.0 < self.kelly_fraction <= 1.0):
@@ -168,6 +185,12 @@ class StrategyConfig:
             raise ValueError(f"profit_target_pct must be >= 0, got {self.profit_target_pct}")
         if self.time_exit_hours < 0:
             raise ValueError(f"time_exit_hours must be >= 0, got {self.time_exit_hours}")
+        if not (0.0 < self.max_portfolio_pct <= 1.0):
+            raise ValueError(f"max_portfolio_pct must be in (0, 1], got {self.max_portfolio_pct}")
+        if not (0.0 < self.max_total_invested_pct <= 1.0):
+            raise ValueError(
+                f"max_total_invested_pct must be in (0, 1], got {self.max_total_invested_pct}"
+            )
         if self.carry_price_min >= self.carry_price_max:
             raise ValueError(
                 f"carry_price_min ({self.carry_price_min}) must be < carry_price_max ({self.carry_price_max})"

@@ -163,6 +163,7 @@ class MarketSimulator:
                 for level in market.orderbook
                 if level.quantity > 0
             ],
+            tags=list(market.tags),
         )
 
     def simulate_market_order(

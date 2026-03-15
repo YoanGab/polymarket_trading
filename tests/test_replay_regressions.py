@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from statistics import mean, stdev
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,16 +18,24 @@ from polymarket_backtest.types import (
     FillResult,
     ForecastOutput,
     MarketState,
+    OrderIntent,
     OrderLevel,
     PositionState,
+    ReplayConfig,
     StrategyConfig,
 )
 
 
-def _make_market_state(*, best_bid: float, best_ask: float) -> MarketState:
+def _make_market_state(
+    *,
+    best_bid: float,
+    best_ask: float,
+    market_id: str = "test_market",
+    tags: list[str] | None = None,
+) -> MarketState:
     ts = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
     return MarketState(
-        market_id="test_market",
+        market_id=market_id,
         title="Test market",
         domain="test",
         market_type="binary",
@@ -51,6 +60,7 @@ def _make_market_state(*, best_bid: float, best_ask: float) -> MarketState:
             OrderLevel(side="bid", price=max(0.001, best_bid), quantity=100.0, level_no=1),
             OrderLevel(side="ask", price=max(0.001, best_ask), quantity=100.0, level_no=1),
         ],
+        tags=list(tags or []),
     )
 
 
@@ -161,6 +171,80 @@ def test_strategy_engine_handles_zero_best_ask_without_division_error() -> None:
     assert orders[0].limit_price >= 0.001
 
 
+def test_strategy_engine_respects_category_routing() -> None:
+    engine = StrategyEngine()
+    market = _make_market_state(best_bid=0.49, best_ask=0.51, tags=["Sports"])
+    forecast = _make_forecast(probability_yes=0.70, confidence=0.9)
+
+    allowed_config = StrategyConfig(
+        name="crypto_only",
+        family="edge_based",
+        kelly_fraction=0.1,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=60,
+        min_confidence=0.6,
+        allowed_categories=["Crypto"],
+    )
+    blocked_config = StrategyConfig(
+        name="not_sports",
+        family="edge_based",
+        kelly_fraction=0.1,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=60,
+        min_confidence=0.6,
+        blocked_categories=["Sports"],
+    )
+
+    assert engine.decide(
+        config=allowed_config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+    ) == []
+    assert engine.decide(
+        config=blocked_config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+    ) == []
+
+
+def test_apply_market_category_metadata_overrides_fees() -> None:
+    engine = object.__new__(ReplayEngine)
+    engine.market_categories = {
+        "crypto_market": ["Crypto"],
+        "sports_market": ["Sports", "NBA"],
+        "political_market": ["Politics"],
+    }
+
+    crypto = ReplayEngine._apply_market_category_metadata(
+        engine,
+        _make_market_state(best_bid=0.49, best_ask=0.51, market_id="crypto_market"),
+    )
+    sports = ReplayEngine._apply_market_category_metadata(
+        engine,
+        _make_market_state(best_bid=0.49, best_ask=0.51, market_id="sports_market"),
+    )
+    political = ReplayEngine._apply_market_category_metadata(
+        engine,
+        _make_market_state(best_bid=0.49, best_ask=0.51, market_id="political_market"),
+    )
+
+    assert crypto.tags == ["Crypto"]
+    assert crypto.fees_enabled is True
+    assert crypto.fee_rate == pytest.approx(0.0025)
+    assert sports.tags == ["Sports", "NBA"]
+    assert sports.fees_enabled is True
+    assert sports.fee_rate == pytest.approx(0.000175)
+    assert political.tags == ["Politics"]
+    assert political.fees_enabled is False
+    assert political.fee_rate == pytest.approx(0.0)
+
+
 def test_resolution_convergence_can_buy_no_when_yes_is_overpriced() -> None:
     engine = StrategyEngine()
     config = StrategyConfig(
@@ -191,6 +275,96 @@ def test_resolution_convergence_can_buy_no_when_yes_is_overpriced() -> None:
     assert orders[0].is_no_bet is True
     assert orders[0].limit_price == pytest.approx(0.32)
     assert "Resolution convergence NO" in orders[0].thesis
+
+
+def test_edge_based_caps_single_position_to_max_portfolio_pct() -> None:
+    engine = StrategyEngine()
+    capped_config = StrategyConfig(
+        name="edge_capped",
+        family="edge_based",
+        kelly_fraction=1.0,
+        edge_threshold_bps=25.0,
+        max_position_notional=5_000.0,
+        max_holding_minutes=60,
+        min_confidence=0.6,
+        max_portfolio_pct=0.25,
+    )
+    uncapped_config = StrategyConfig(
+        name="edge_uncapped",
+        family="edge_based",
+        kelly_fraction=1.0,
+        edge_threshold_bps=25.0,
+        max_position_notional=5_000.0,
+        max_holding_minutes=60,
+        min_confidence=0.6,
+        max_portfolio_pct=1.0,
+    )
+    market = _make_market_state(best_bid=0.19, best_ask=0.20)
+    forecast = _make_forecast(probability_yes=0.99, confidence=0.9)
+
+    capped_orders = engine.decide(
+        config=capped_config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+        portfolio_cash=1_000.0,
+        starting_cash=1_000.0,
+        total_invested=0.0,
+    )
+    uncapped_orders = engine.decide(
+        config=uncapped_config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+        portfolio_cash=1_000.0,
+        starting_cash=1_000.0,
+        total_invested=0.0,
+    )
+
+    assert len(capped_orders) == 1
+    assert len(uncapped_orders) == 1
+    capped_notional = capped_orders[0].requested_quantity * capped_orders[0].limit_price
+    uncapped_notional = uncapped_orders[0].requested_quantity * uncapped_orders[0].limit_price
+    assert capped_notional <= 250.0 + 1e-6
+    assert uncapped_notional > capped_notional * 3.5
+
+
+def test_resolution_convergence_records_missed_trade_when_capital_is_reserved() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="resolution_reserved",
+        family="resolution_convergence",
+        kelly_fraction=0.5,
+        edge_threshold_bps=25.0,
+        max_position_notional=1_000.0,
+        max_holding_minutes=None,
+        min_confidence=0.7,
+        resolution_hours_max=72.0,
+        extreme_low=0.2,
+        extreme_high=0.8,
+    )
+    market = _make_market_state(best_bid=0.39, best_ask=0.41)
+    forecast = _make_forecast(probability_yes=0.80, confidence=0.9)
+    missed: list[tuple[float, str]] = []
+
+    orders = engine.decide(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=0.0,
+        portfolio_cash=200.0,
+        starting_cash=1_000.0,
+        total_invested=800.0,
+        on_missed_trade=lambda edge_bps, reason: missed.append((edge_bps, reason)),
+    )
+
+    assert orders == []
+    assert len(missed) == 1
+    assert missed[0][0] > config.edge_threshold_bps
+    assert missed[0][1] == "max_portfolio_pct"
 
 
 def test_should_exit_uses_profit_target_for_no_positions() -> None:
@@ -226,6 +400,77 @@ def test_should_exit_uses_profit_target_for_no_positions() -> None:
     )
 
     assert should_exit is True
+
+
+def test_available_cash_for_entries_respects_remaining_investable_cap() -> None:
+    engine = object.__new__(ReplayEngine)
+    engine.config = ReplayConfig(experiment_name="test", starting_cash=1_000.0, lookback_minutes=60)
+    strategy = StrategyConfig(
+        name="edge_cap",
+        family="edge_based",
+        kelly_fraction=0.1,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=60,
+        max_total_invested_pct=0.8,
+    )
+    portfolio = StrategyPortfolio(cash=250.0)
+
+    available_cash = ReplayEngine._available_cash_for_entries(engine, portfolio, strategy)
+
+    assert available_cash == pytest.approx(50.0)
+
+
+def test_execute_order_tracks_missed_trade_under_cash_pressure() -> None:
+    engine = object.__new__(ReplayEngine)
+    engine.config = ReplayConfig(experiment_name="test", starting_cash=1_000.0, lookback_minutes=60)
+    strategy = StrategyConfig(
+        name="edge_cash_pressure",
+        family="edge_based",
+        kelly_fraction=0.1,
+        edge_threshold_bps=100.0,
+        max_position_notional=250.0,
+        max_holding_minutes=60,
+    )
+    engine.strategies = [strategy]
+    engine._strategy_by_name = {strategy.name: strategy}
+    engine.simulator = SimpleNamespace(
+        _market_for_intent=lambda market, order: market,
+        _simulate_aggressive=lambda market, order: SimpleNamespace(vwap_price=0.5, quantity=200.0),
+        _simulate_passive=lambda market, next_market, order: SimpleNamespace(vwap_price=0.5, quantity=200.0),
+    )
+    engine._normalize_quotes = lambda market: market
+    engine._ensure_orderbook = lambda market, reason: market
+    engine._build_degraded_next_market = lambda market, order: market
+    engine._strategy_config = ReplayEngine._strategy_config.__get__(engine, ReplayEngine)
+    engine._record_missed_trade = ReplayEngine._record_missed_trade.__get__(engine, ReplayEngine)
+    portfolio = StrategyPortfolio(cash=260.0)
+    market = _make_market_state(best_bid=0.49, best_ask=0.51)
+    edge_order = OrderIntent(
+        strategy_name=strategy.name,
+        market_id=market.market_id,
+        ts=market.ts,
+        side="buy",
+        liquidity_intent="aggressive",
+        limit_price=market.best_ask,
+        requested_quantity=200.0,
+        kelly_fraction=strategy.kelly_fraction,
+        edge_bps=120.0,
+        holding_period_minutes=strategy.max_holding_minutes,
+        thesis="low edge under cash pressure",
+    )
+
+    ReplayEngine._execute_order(
+        engine,
+        portfolio,
+        market,
+        market,
+        edge_order,
+        entry_probability=0.6,
+    )
+
+    assert portfolio.missed_trades == 1
+    assert portfolio.missed_edge_bps == pytest.approx(120.0)
 
 
 def test_settle_resolved_positions_uses_no_payout_ratio() -> None:

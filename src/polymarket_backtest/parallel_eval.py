@@ -58,7 +58,7 @@ def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
 
     Args is a tuple of:
         (db_path, market_ids, strategy_dicts, starting_cash, transport_mode,
-         eval_stride, experiment_id, worker_index)
+         eval_stride, experiment_id, worker_index, market_categories)
     """
     (
         db_path,
@@ -69,6 +69,7 @@ def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
         eval_stride,
         experiment_id,
         worker_index,
+        market_categories,
     ) = args
 
     worker_name = f"worker-{worker_index}"
@@ -120,6 +121,7 @@ def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
         config=config,
         grok=grok,
         strategies=strategies,
+        market_categories=market_categories,
     )
     engine.run_markets(market_ids)
 
@@ -140,6 +142,7 @@ def run_parallel_grid_search(
     starting_cash: float,
     transport_mode: str,
     market_ids: list[str],
+    market_categories: dict[str, list[str]],
     eval_stride: int = 4,
     n_workers: int = 0,
 ) -> tuple[int, dict[str, Any]]:
@@ -229,6 +232,7 @@ def run_parallel_grid_search(
             eval_stride,
             experiment_id,
             i,
+            {mid: market_categories.get(mid, []) for mid in group},
         )
         for i, group in enumerate(groups)
     ]

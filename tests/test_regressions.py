@@ -456,6 +456,22 @@ def test_expanded_strategy_grid_uses_honest_edge_names() -> None:
     }
 
 
+def test_expanded_strategy_grid_routes_by_category() -> None:
+    strategies = {strategy.name: strategy for strategy in expanded_strategy_grid()}
+
+    assert "political_event_wide" in strategies
+    assert strategies["political_event_wide"].blocked_categories is not None
+    assert "Crypto" in (strategies["political_event_wide"].blocked_categories or [])
+    assert "Sports" in (strategies["political_event_wide"].blocked_categories or [])
+
+    assert strategies["crypto_resolution_day"].allowed_categories == ["Crypto", "Crypto Prices"]
+    assert strategies["crypto_edge_fast"].allowed_categories == ["Crypto", "Crypto Prices"]
+
+    sports_categories = strategies["sports_resolution_day"].allowed_categories or []
+    assert "Sports" in sports_categories
+    assert "NBA" in sports_categories
+
+
 def test_interpolate_snapshot_keeps_start_tick_size() -> None:
     ts = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     interpolated = _interpolate_snapshot(
