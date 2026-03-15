@@ -158,19 +158,17 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # 9. Contrarian: fade extreme prices when forecast disagrees
+        # 9. Edge-based high conviction: high confidence + pure edge
         StrategyConfig(
-            name="contrarian_fade",
-            family="contrarian",
-            kelly_fraction=0.30,
+            name="edge_conviction",
+            family="edge_based",
+            kelly_fraction=0.40,
             edge_threshold_bps=300.0,
-            max_position_notional=1000.0,
+            max_position_notional=1500.0,
             max_holding_minutes=10080,
-            min_confidence=0.65,
-            extreme_low=0.10,
-            extreme_high=0.90,
+            min_confidence=0.75,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.12,
             aggressive_entry=True,
         ),
         # 10. High conviction: high confidence, wide range
@@ -188,20 +186,18 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.12,
         ),
-        # 11. Conviction lowodds: high confidence on underdogs
+        # 11. Edge-based moderate: balanced edge + sizing
         StrategyConfig(
-            name="conviction_lowodds",
-            family="resolution_convergence",
-            kelly_fraction=0.50,
-            edge_threshold_bps=500.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.75,
-            extreme_low=0.15,
-            extreme_high=0.80,
+            name="edge_moderate",
+            family="edge_based",
+            kelly_fraction=0.20,
+            edge_threshold_bps=700.0,
+            max_position_notional=800.0,
+            max_holding_minutes=10080,
+            min_confidence=0.65,
             use_thesis_stop=True,
-            thesis_stop_delta=0.12,
+            thesis_stop_delta=0.10,
+            aggressive_entry=True,
         ),
         # 12. Edge-based: pure forecast edge, no resolution context
         StrategyConfig(
