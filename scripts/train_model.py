@@ -1151,6 +1151,13 @@ def main() -> None:
         "price_vs_mean_720h",
         "distance_to_720h_high",
         "distance_to_720h_low",
+        # Temporal aggregate features — available via prev_snapshots
+        "trend_slope_72h",
+        "return_autocorr_1",
+        "volatility_ratio",
+        "max_drawdown",
+        "price_position_in_range",
+        "spread_trend",
         # Tag features — available via market.tags in context_bundle
         "n_tags",
     }

@@ -101,6 +101,13 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
         "price_vs_mean_720h": 0.0,
         "distance_to_720h_high": 0.0,
         "distance_to_720h_low": 0.0,
+        # Temporal aggregate features
+        "trend_slope_72h": 0.0,
+        "return_autocorr_1": 0.0,
+        "volatility_ratio": 1.0,
+        "max_drawdown": 0.0,
+        "price_position_in_range": 0.5,
+        "spread_trend": 0.0,
     }
     for lookback in MOMENTUM_LOOKBACKS:
         history_defaults[f"momentum_{lookback}h"] = 0.0
@@ -150,6 +157,63 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
             features["price_vs_mean_720h"] = mid - mean_720
             features["distance_to_720h_high"] = high_720 - mid
             features["distance_to_720h_low"] = mid - low_720
+
+        # Temporal aggregate features (research-driven)
+        mids_arr = np.array(prev_mids + [mid], dtype=np.float64)
+        n = len(mids_arr)
+
+        # 1. Price trend slope (linear regression on last 72h)
+        window = min(72, n)
+        if window >= 3:
+            x = np.arange(window, dtype=np.float64)
+            y = mids_arr[-window:]
+            slope = float((np.mean(x * y) - np.mean(x) * np.mean(y)) / max(np.var(x), 1e-12))
+            features["trend_slope_72h"] = slope
+        else:
+            features["trend_slope_72h"] = 0.0
+
+        # 2. Return autocorrelation lag-1 (mean-reversion vs momentum)
+        if n >= 6:
+            returns = np.diff(mids_arr[-min(72, n) :])
+            if len(returns) >= 3 and np.std(returns) > 1e-9:
+                features["return_autocorr_1"] = float(np.corrcoef(returns[:-1], returns[1:])[0, 1])
+            else:
+                features["return_autocorr_1"] = 0.0
+        else:
+            features["return_autocorr_1"] = 0.0
+
+        # 3. Volatility ratio (short/long) — regime change signal
+        if n >= 48:
+            vol_short = float(np.std(mids_arr[-12:]))
+            vol_long = float(np.std(mids_arr[-48:]))
+            features["volatility_ratio"] = vol_short / max(vol_long, 1e-9)
+        else:
+            features["volatility_ratio"] = 1.0
+
+        # 4. Max drawdown (from peak)
+        if n >= 6:
+            cummax = np.maximum.accumulate(mids_arr[-min(168, n) :])
+            drawdowns = mids_arr[-min(168, n) :] - cummax
+            features["max_drawdown"] = float(np.min(drawdowns))
+        else:
+            features["max_drawdown"] = 0.0
+
+        # 5. Price position in range (0=at low, 1=at high)
+        if n >= 6:
+            recent = mids_arr[-min(72, n) :]
+            lo, hi = float(np.min(recent)), float(np.max(recent))
+            features["price_position_in_range"] = (mid - lo) / max(hi - lo, 1e-9)
+        else:
+            features["price_position_in_range"] = 0.5
+
+        # 6. Spread trend (is spread widening or narrowing?)
+        prev_spreads = (
+            [float(r["best_ask"]) - float(r["best_bid"]) for r in prev_rows[-24:]] if len(prev_rows) >= 6 else []
+        )
+        if len(prev_spreads) >= 6:
+            features["spread_trend"] = float(np.mean(prev_spreads[-3:])) - float(np.mean(prev_spreads[:3]))
+        else:
+            features["spread_trend"] = 0.0
 
     return features
 
