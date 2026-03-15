@@ -32,6 +32,10 @@ COMMIT_EVERY = 50
 PROGRESS_EVERY = 50
 
 
+def _position_key(market_id: str, is_no_bet: bool = False) -> str:
+    return f"{market_id}:NO" if is_no_bet else market_id
+
+
 @dataclass
 class StrategyPortfolio:
     cash: float
@@ -480,15 +484,18 @@ class ReplayEngine:
 
         for strategy in self.strategies:
             portfolio = self.portfolios[strategy.name]
-            position = portfolio.positions.get(market_id)
             just_exited = False
-
-            if self.strategy_engine.should_exit(
-                config=strategy,
-                market=market,
-                forecast=forecast,
-                position=position,
-            ):
+            for position_key in (_position_key(market_id), _position_key(market_id, True)):
+                position = portfolio.positions.get(position_key)
+                if position is None or position.quantity <= 0:
+                    continue
+                if not self.strategy_engine.should_exit(
+                    config=strategy,
+                    market=market,
+                    forecast=forecast,
+                    position=position,
+                ):
+                    continue
                 exit_order = self.strategy_engine.exit_order(
                     config=strategy,
                     market=market,
@@ -499,7 +506,7 @@ class ReplayEngine:
                     market,
                     next_market,
                     exit_order,
-                    entry_probability=position.entry_probability if position is not None else market.mid,
+                    entry_probability=position.entry_probability,
                 )
                 just_exited = True
 
@@ -515,7 +522,8 @@ class ReplayEngine:
                 config=strategy,
                 market=market,
                 forecast=forecast,
-                position=portfolio.positions.get(market_id),
+                position=portfolio.positions.get(_position_key(market_id)),
+                no_position=portfolio.positions.get(_position_key(market_id, True)),
                 available_cash=self._available_cash_for_entries(portfolio, strategy),
                 portfolio_cash=portfolio.cash,
                 starting_cash=self.config.starting_cash,
@@ -922,9 +930,14 @@ class ReplayEngine:
         *,
         is_no_bet: bool = False,
     ) -> None:
+        position_key = _position_key(fill.market_id, is_no_bet)
         position = portfolio.positions.setdefault(
-            fill.market_id,
-            PositionState(strategy_name=fill.strategy_name, market_id=fill.market_id),
+            position_key,
+            PositionState(
+                strategy_name=fill.strategy_name,
+                market_id=fill.market_id,
+                is_no_bet=is_no_bet,
+            ),
         )
         notional = fill.price * fill.quantity
         should_evict = False
@@ -977,6 +990,7 @@ class ReplayEngine:
             position.quantity = new_quantity
             position.total_opened_quantity += fill.quantity
             position.total_opened_notional += notional
+            position.is_no_bet = is_no_bet
             if position.opened_ts is None:
                 position.opened_ts = fill.fill_ts
                 position.closed_ts = None
@@ -1007,7 +1021,7 @@ class ReplayEngine:
         assert portfolio.cash >= -1e-9, f"Cash went negative after fill: {portfolio.cash}"
         portfolio.cash = max(0.0, portfolio.cash)
         if should_evict:
-            self._persist_and_evict_position(portfolio, fill.market_id)
+            self._persist_and_evict_position(portfolio, position_key)
 
     def _mark_portfolio_from_market(
         self,
@@ -1019,48 +1033,63 @@ class ReplayEngine:
     ) -> None:
         market = self._normalize_quotes(market)
         market_id = market.market_id
-        position = portfolio.positions.get(market_id)
-        mark_price = self._position_mark_price(market, position)
-        portfolio.last_known_mids[market_id] = mark_price
-        position_qty = position.quantity if position is not None else 0.0
-        inventory_value = position_qty * mark_price
+        market_positions = [
+            (position_key, position)
+            for position_key in (_position_key(market_id), _position_key(market_id, True))
+            if (position := portfolio.positions.get(position_key)) is not None
+        ]
+        if market_positions:
+            for position_key, position in market_positions:
+                portfolio.last_known_mids[position_key] = self._position_mark_price(market, position)
+        else:
+            portfolio.last_known_mids[market_id] = market.mid
         total_inventory_value = sum(
-            position_state.quantity * portfolio.last_known_mids.get(position_market_id, position_state.avg_entry_price)
-            for position_market_id, position_state in portfolio.positions.items()
+            position_state.quantity
+            * portfolio.last_known_mids.get(
+                _position_key(position_state.market_id, position_state.is_no_bet),
+                position_state.avg_entry_price,
+            )
+            for position_state in portfolio.positions.values()
             if position_state.quantity > 0
         )
-        unrealized = 0.0
-        if position is not None and position_qty > 0:
-            unrealized = (mark_price - position.avg_entry_price) * position_qty
         equity = portfolio.cash + total_inventory_value
-        self.conn.execute(
-            """
-            INSERT INTO pnl_marks (
-                experiment_id, strategy_name, market_id, ts, cash, position_qty,
-                mark_price, inventory_value, equity, realized_pnl, unrealized_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                self.experiment_id,
-                strategy_name,
-                market_id,
-                isoformat(mark_ts or market.ts),
-                round(portfolio.cash, 4),
-                round(position_qty, 4),
-                round(mark_price, 4),
-                round(inventory_value, 4),
-                round(equity, 4),
-                round(portfolio.realized_pnl, 4),
-                round(unrealized, 4),
-            ),
-        )
+        mark_rows = market_positions or [(market_id, None)]
+        for position_key, position in mark_rows:
+            mark_price = self._position_mark_price(market, position)
+            position_qty = position.quantity if position is not None else 0.0
+            inventory_value = position_qty * mark_price
+            unrealized = 0.0
+            if position is not None and position_qty > 0:
+                unrealized = (mark_price - position.avg_entry_price) * position_qty
+            self.conn.execute(
+                """
+                INSERT INTO pnl_marks (
+                    experiment_id, strategy_name, market_id, ts, cash, position_qty,
+                    mark_price, inventory_value, equity, realized_pnl, unrealized_pnl
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.experiment_id,
+                    strategy_name,
+                    position_key,
+                    isoformat(mark_ts or market.ts),
+                    round(portfolio.cash, 4),
+                    round(position_qty, 4),
+                    round(mark_price, 4),
+                    round(inventory_value, 4),
+                    round(equity, 4),
+                    round(portfolio.realized_pnl, 4),
+                    round(unrealized, 4),
+                ),
+            )
 
     def _settle_resolved_positions(self, replay_ts: datetime) -> None:
         for strategy in self.strategies:
             portfolio = self.portfolios[strategy.name]
-            for market_id, position in list(portfolio.positions.items()):
+            for position_key, position in list(portfolio.positions.items()):
                 if position.quantity <= 0:
                     continue
+                market_id = position.market_id
                 resolution = self._get_resolution(market_id)
                 if resolution is None or resolution["resolution_ts"] is None:
                     continue
@@ -1104,10 +1133,10 @@ class ReplayEngine:
                 position.fees_paid += settlement_fee
                 position.quantity = 0.0
                 position.closed_ts = resolution_ts
-                self._persist_and_evict_position(portfolio, market_id)
+                self._persist_and_evict_position(portfolio, position_key)
 
-    def _persist_and_evict_position(self, portfolio: StrategyPortfolio, market_id: str) -> None:
-        position = portfolio.positions.get(market_id)
+    def _persist_and_evict_position(self, portfolio: StrategyPortfolio, position_key: str) -> None:
+        position = portfolio.positions.get(position_key)
         if position is None:
             return
         self._persist_position(position)
@@ -1116,7 +1145,8 @@ class ReplayEngine:
         position.thesis = ""
         position.avg_entry_price = 0.0
         position.is_no_bet = False
-        del portfolio.positions[market_id]
+        portfolio.last_known_mids.pop(position_key, None)
+        del portfolio.positions[position_key]
 
     def _persist_position(self, position: PositionState) -> None:
         if position.opened_ts is None:

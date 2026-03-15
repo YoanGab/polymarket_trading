@@ -134,6 +134,52 @@ def test_apply_fill_sell_excludes_fees_from_realized_pnl_and_resets_flat_state()
     assert "test_market" not in portfolio.positions
 
 
+def test_apply_fill_tracks_yes_and_no_positions_separately() -> None:
+    engine = object.__new__(ReplayEngine)
+    engine._persist_position = lambda position: None
+    engine._persist_and_evict_position = ReplayEngine._persist_and_evict_position.__get__(engine, ReplayEngine)
+    ts = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+    portfolio = StrategyPortfolio(cash=100.0)
+    yes_fill = FillResult(
+        order_id="order-yes",
+        market_id="test_market",
+        strategy_name="test_strategy",
+        fill_ts=ts,
+        side="buy",
+        liquidity_role="taker",
+        price=0.40,
+        quantity=10.0,
+        fee_usdc=0.0,
+        rebate_usdc=0.0,
+        impact_bps=0.0,
+        fill_delay_seconds=0.0,
+    )
+    no_fill = FillResult(
+        order_id="order-no",
+        market_id="test_market",
+        strategy_name="test_strategy",
+        fill_ts=ts,
+        side="buy",
+        liquidity_role="taker",
+        price=0.30,
+        quantity=5.0,
+        fee_usdc=0.0,
+        rebate_usdc=0.0,
+        impact_bps=0.0,
+        fill_delay_seconds=0.0,
+    )
+
+    ReplayEngine._apply_fill(engine, portfolio, yes_fill, "YES thesis", 0.65)
+    ReplayEngine._apply_fill(engine, portfolio, no_fill, "NO thesis", 0.35, is_no_bet=True)
+
+    assert portfolio.cash == pytest.approx(94.5)
+    assert set(portfolio.positions) == {"test_market", "test_market:NO"}
+    assert portfolio.positions["test_market"].quantity == pytest.approx(10.0)
+    assert portfolio.positions["test_market"].is_no_bet is False
+    assert portfolio.positions["test_market:NO"].quantity == pytest.approx(5.0)
+    assert portfolio.positions["test_market:NO"].is_no_bet is True
+
+
 def test_normalize_quotes_clamps_zero_quotes_and_preserves_spread() -> None:
     engine = object.__new__(ReplayEngine)
     market = _make_market_state(best_bid=0.0, best_ask=0.0)
@@ -275,6 +321,49 @@ def test_resolution_convergence_can_buy_no_when_yes_is_overpriced() -> None:
     assert orders[0].is_no_bet is True
     assert orders[0].limit_price == pytest.approx(0.32)
     assert "Resolution convergence NO" in orders[0].thesis
+
+
+def test_resolution_convergence_can_open_no_while_holding_yes() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="resolution_two_sided",
+        family="resolution_convergence",
+        kelly_fraction=0.2,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+        min_confidence=0.7,
+        resolution_hours_max=72.0,
+        extreme_low=0.2,
+        extreme_high=0.8,
+        allow_pyramiding=False,
+    )
+    market = _make_market_state(best_bid=0.68, best_ask=0.70)
+    forecast = _make_forecast(probability_yes=0.45, confidence=0.9)
+    yes_position = PositionState(
+        strategy_name=config.name,
+        market_id=market.market_id,
+        quantity=10.0,
+        avg_entry_price=0.35,
+        total_opened_quantity=10.0,
+        total_opened_notional=3.5,
+        opened_ts=market.ts - timedelta(hours=2),
+        entry_probability=0.60,
+    )
+
+    orders = engine.decide(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=yes_position,
+        no_position=None,
+        available_cash=1_000.0,
+    )
+
+    assert len(orders) == 1
+    assert orders[0].side == "buy"
+    assert orders[0].is_no_bet is True
+    assert orders[0].limit_price == pytest.approx(0.32)
 
 
 def test_edge_based_caps_single_position_to_max_portfolio_pct() -> None:
@@ -558,7 +647,7 @@ def test_settle_resolved_positions_uses_no_payout_ratio() -> None:
         "resolution_no": StrategyPortfolio(
             cash=5.0,
             positions={
-                "test_market": PositionState(
+                "test_market:NO": PositionState(
                     strategy_name="resolution_no",
                     market_id="test_market",
                     quantity=10.0,
@@ -578,7 +667,79 @@ def test_settle_resolved_positions_uses_no_payout_ratio() -> None:
 
     assert engine.portfolios["resolution_no"].cash == pytest.approx(15.0)
     assert engine.portfolios["resolution_no"].realized_pnl == pytest.approx(7.0)
-    assert "test_market" not in engine.portfolios["resolution_no"].positions
+    assert "test_market:NO" not in engine.portfolios["resolution_no"].positions
+
+
+def test_mark_portfolio_tracks_yes_and_no_positions_on_same_market() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE pnl_marks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id INTEGER NOT NULL,
+            strategy_name TEXT NOT NULL,
+            market_id TEXT,
+            ts TEXT NOT NULL,
+            cash REAL NOT NULL,
+            position_qty REAL NOT NULL,
+            mark_price REAL NOT NULL,
+            inventory_value REAL NOT NULL,
+            equity REAL NOT NULL,
+            realized_pnl REAL NOT NULL,
+            unrealized_pnl REAL NOT NULL
+        )
+        """
+    )
+    engine = object.__new__(ReplayEngine)
+    engine.conn = conn
+    engine.experiment_id = 1
+    engine._normalize_quotes = ReplayEngine._normalize_quotes.__get__(engine, ReplayEngine)
+    portfolio = StrategyPortfolio(
+        cash=100.0,
+        positions={
+            "test_market": PositionState(
+                strategy_name="mark_test",
+                market_id="test_market",
+                quantity=2.0,
+                avg_entry_price=0.50,
+            ),
+            "test_market:NO": PositionState(
+                strategy_name="mark_test",
+                market_id="test_market",
+                quantity=3.0,
+                avg_entry_price=0.40,
+                is_no_bet=True,
+            ),
+        },
+    )
+    market = _make_market_state(best_bid=0.64, best_ask=0.66)
+
+    ReplayEngine._mark_portfolio_from_market(
+        engine,
+        portfolio=portfolio,
+        strategy_name="mark_test",
+        market=market,
+    )
+
+    rows = conn.execute(
+        """
+        SELECT market_id, mark_price, inventory_value, equity
+        FROM pnl_marks
+        ORDER BY market_id
+        """
+    ).fetchall()
+
+    assert [str(row["market_id"]) for row in rows] == ["test_market", "test_market:NO"]
+    assert rows[0]["mark_price"] == pytest.approx(0.65)
+    assert rows[0]["inventory_value"] == pytest.approx(1.3)
+    assert rows[1]["mark_price"] == pytest.approx(0.35)
+    assert rows[1]["inventory_value"] == pytest.approx(1.05)
+    expected_equity = 100.0 + 1.3 + 1.05
+    assert rows[0]["equity"] == pytest.approx(expected_equity)
+    assert rows[1]["equity"] == pytest.approx(expected_equity)
+    assert portfolio.last_known_mids["test_market"] == pytest.approx(0.65)
+    assert portfolio.last_known_mids["test_market:NO"] == pytest.approx(0.35)
 
 
 def test_compute_calibration_curve_skips_unresolved_markets() -> None:

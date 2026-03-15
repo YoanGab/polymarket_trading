@@ -129,6 +129,7 @@ class StrategyEngine:
         forecast: ForecastOutput,
         position: PositionState | None,
         available_cash: float,
+        no_position: PositionState | None = None,
         portfolio_cash: float | None = None,
         starting_cash: float | None = None,
         total_invested: float | None = None,
@@ -138,16 +139,18 @@ class StrategyEngine:
             return []
         if not self._market_category_allowed(config, market):
             return []
+        yes_position = position if position is None or not position.is_no_bet else None
+        held_no_position = no_position if no_position is None or no_position.is_no_bet else None
         orders: list[OrderIntent] = []
         if config.family == "carry_only":
-            orders.extend(self._carry_only(config, market, forecast, position, available_cash))
+            orders.extend(self._carry_only(config, market, forecast, yes_position, available_cash))
         elif config.family in {"news_driven", "edge_based"}:
             orders.extend(
                 self._edge_based(
                     config,
                     market,
                     forecast,
-                    position,
+                    yes_position,
                     available_cash,
                     portfolio_cash=portfolio_cash,
                     starting_cash=starting_cash,
@@ -156,20 +159,21 @@ class StrategyEngine:
                 )
             )
         elif config.family == "mean_reversion":
-            orders.extend(self._mean_reversion(config, market, forecast, position, available_cash))
+            orders.extend(self._mean_reversion(config, market, forecast, yes_position, available_cash))
         elif config.family == "contrarian":
-            orders.extend(self._contrarian(config, market, forecast, position, available_cash))
+            orders.extend(self._contrarian(config, market, forecast, yes_position, available_cash))
         elif config.family == "momentum":
-            orders.extend(self._momentum(config, market, forecast, position, available_cash))
+            orders.extend(self._momentum(config, market, forecast, yes_position, available_cash))
         elif config.family == "volume_breakout":
-            orders.extend(self._volume_breakout(config, market, forecast, position, available_cash))
+            orders.extend(self._volume_breakout(config, market, forecast, yes_position, available_cash))
         elif config.family == "resolution_convergence":
             orders.extend(
                 self._resolution_convergence(
                     config,
                     market,
                     forecast,
-                    position,
+                    yes_position,
+                    held_no_position,
                     available_cash,
                     portfolio_cash=portfolio_cash,
                     starting_cash=starting_cash,
@@ -707,7 +711,8 @@ class StrategyEngine:
         config: StrategyConfig,
         market: MarketState,
         forecast: ForecastOutput,
-        position: PositionState | None,
+        yes_position: PositionState | None,
+        no_position: PositionState | None,
         available_cash: float,
         *,
         portfolio_cash: float | None = None,
@@ -729,12 +734,8 @@ class StrategyEngine:
         if hours_to_res > config.resolution_hours_max or hours_to_res <= 0:
             return []
 
-        if position is not None and position.quantity > 0:
-            # Allow pyramiding if configured; otherwise hold
-            if not config.allow_pyramiding:
-                return []
-            # Fall through to entry logic -- pyramid_quantity will gate the add-on
-            pass
+        has_yes_position = yes_position is not None and yes_position.quantity > 0
+        has_no_position = no_position is not None and no_position.quantity > 0
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
         mid_low = config.extreme_low
@@ -770,17 +771,20 @@ class StrategyEngine:
             )
             if per_position_cash <= 0:
                 return []
-            if position is not None and position.quantity > 0:
-                # Pyramiding: add to existing profitable position
-                quantity = _pyramid_quantity(
-                    config=config,
-                    market=market,
-                    position=position,
-                    net_edge_bps=net_edge_bps,
-                    ask_price=ask_price,
-                    available_cash=per_position_cash,
-                    forecast_probability=forecast.probability_yes,
-                )
+            if has_yes_position:
+                if not config.allow_pyramiding:
+                    quantity = 0.0
+                else:
+                    # Pyramiding: add to existing profitable position
+                    quantity = _pyramid_quantity(
+                        config=config,
+                        market=market,
+                        position=yes_position,
+                        net_edge_bps=net_edge_bps,
+                        ask_price=ask_price,
+                        available_cash=per_position_cash,
+                        forecast_probability=forecast.probability_yes,
+                    )
             else:
                 kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
                 notional = min(
@@ -790,7 +794,7 @@ class StrategyEngine:
                 quantity = notional / ask_price if notional > 0 else 0.0
             quantity = _apply_volume_cap(quantity, config, market)
             if quantity >= MIN_ORDER_QUANTITY:
-                label = "Pyramid add" if (position is not None and position.quantity > 0) else "Resolution convergence"
+                label = "Pyramid add" if has_yes_position else "Resolution convergence"
                 return [
                     OrderIntent(
                         strategy_name=config.name,
@@ -826,17 +830,19 @@ class StrategyEngine:
         if per_position_cash <= 0:
             return []
         probability_no = 1.0 - forecast.probability_yes
-        if position is not None and position.quantity > 0:
-            # Pyramiding NO side
-            quantity_no = _pyramid_quantity(
-                config=config,
-                market=market,
-                position=position,
-                net_edge_bps=net_no_edge,
-                ask_price=no_price,
-                available_cash=per_position_cash,
-                forecast_probability=probability_no,
-            )
+        if has_no_position:
+            if not config.allow_pyramiding:
+                quantity_no = 0.0
+            else:
+                quantity_no = _pyramid_quantity(
+                    config=config,
+                    market=market,
+                    position=no_position,
+                    net_edge_bps=net_no_edge,
+                    ask_price=no_price,
+                    available_cash=per_position_cash,
+                    forecast_probability=probability_no,
+                )
         else:
             kelly_no = kelly_fraction_for_probability(no_price, probability_no)
             notional_no = min(
@@ -847,7 +853,7 @@ class StrategyEngine:
         quantity_no = _apply_volume_cap(quantity_no, config, market)
         if quantity_no < MIN_ORDER_QUANTITY:
             return []
-        label_no = "Pyramid add NO" if (position is not None and position.quantity > 0) else "Resolution convergence NO"
+        label_no = "Pyramid add NO" if has_no_position else "Resolution convergence NO"
         return [
             OrderIntent(
                 strategy_name=config.name,
