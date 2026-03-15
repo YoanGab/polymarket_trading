@@ -158,15 +158,17 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # 9. Edge-based high-edge: stricter filter for quality trades
+        # 9. Contrarian: fade extreme prices when forecast disagrees
         StrategyConfig(
-            name="edge_strict",
-            family="edge_based",
+            name="contrarian_fade",
+            family="contrarian",
             kelly_fraction=0.30,
-            edge_threshold_bps=800.0,
+            edge_threshold_bps=300.0,
             max_position_notional=1000.0,
             max_holding_minutes=10080,
             min_confidence=0.65,
+            extreme_low=0.10,
+            extreme_high=0.90,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
