@@ -350,7 +350,7 @@ def train_xgboost(
         "eval_metric": "logloss",
         "eta": 0.02,
         "max_depth": 0,  # unlimited depth for lossguide
-        "max_leaves": 1024,
+        "max_leaves": 512,
         "grow_policy": "lossguide",
         "min_child_weight": 200,
         "subsample": 0.5,
