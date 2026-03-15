@@ -80,16 +80,18 @@ class MarketSimulator:
         if estimate.quantity < self.minimum_fill_quantity:
             return []
 
-        # Polymarket always charges taker fees on the CLOB. The DB may have
-        # fees_enabled=False due to Gamma API semantics, but real trading fees
-        # are always applied. Use 0.02 (2%) when DB has 0.
-        effective_fee_rate = market.fee_rate if market.fee_rate > 0 else 0.02
+        # Polymarket fee structure (2025-2026):
+        # - Political/event markets: NO trading fees (fees_enabled=False, fee_rate=0)
+        # - Crypto markets: 0.25% fee_rate with quadratic formula
+        # - Sports (NCAAB, Serie A): 0.0175% fee_rate
+        # - Settlement: NO fees on resolution winnings
+        # The DB values (fees_enabled, fee_rate) are correct per-market.
         fee_usdc = (
             PolymarketFeeModel.taker_fee_usdc(
                 price=estimate.vwap_price,
                 quantity=estimate.quantity,
-                fees_enabled=estimate.liquidity_role == "taker",
-                fee_rate=effective_fee_rate,
+                fees_enabled=market.fees_enabled and estimate.liquidity_role == "taker",
+                fee_rate=market.fee_rate,
                 exponent=market.fee_exponent,
             )
             if estimate.liquidity_role == "taker"

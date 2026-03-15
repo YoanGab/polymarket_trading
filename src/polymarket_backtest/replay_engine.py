@@ -593,23 +593,11 @@ class ReplayEngine:
     def _settlement_fee_rate(self, market_id: str) -> float:
         """Return the fee rate to apply on profitable settlement payouts.
 
-        Polymarket charges 2% on net winnings. The DB may have fee_rate=0
-        due to the Gamma API returning feesEnabled=false for resolved
-        markets, but fees ARE always charged on the real CLOB exchange.
-        We default to 0.02 (2%) when the DB value is 0 or missing.
+        Polymarket does NOT charge fees on resolution/settlement as of 2025-2026.
+        Trading fees only apply on certain market types (crypto, some sports).
+        Settlement payouts are fee-free. Return 0.0 for all markets.
         """
-        row = self.conn.execute(
-            "SELECT fee_rate FROM markets WHERE market_id = ?",
-            (market_id,),
-        ).fetchone()
-        if row is not None:
-            try:
-                rate = float(row["fee_rate"])
-                if rate > 0:
-                    return rate
-            except (KeyError, TypeError, ValueError):
-                pass
-        return 0.02
+        return 0.0
 
     def _persist_model_output(self, forecast: Any, prompt_hash: str, context_hash: str) -> None:
         self.conn.execute(
