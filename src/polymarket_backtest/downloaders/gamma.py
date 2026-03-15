@@ -100,6 +100,8 @@ def parse_resolution(market: MarketDict) -> MarketDict | None:
         "market_id": market_id,
         "title": title,
         "domain": _derive_domain(market),
+        "event_id": _extract_event_id(market),
+        "tags": _extract_market_tags(market),
         "resolution_ts": resolution_ts,
         "resolved_outcome": resolved_outcome,
         "status": "resolved",
@@ -154,6 +156,8 @@ def markets_to_dataframe(markets: list[MarketDict]) -> pl.DataFrame:
                     "market_id": parsed["market_id"],
                     "title": parsed["title"],
                     "domain": parsed["domain"],
+                    "event_id": parsed.get("event_id"),
+                    "tags": json.dumps(parsed.get("tags", []), ensure_ascii=True, sort_keys=True),
                     "resolution_ts": parsed["resolution_ts"],
                     "resolved_outcome": parsed["resolved_outcome"],
                     "status": parsed["status"],
@@ -167,6 +171,8 @@ def markets_to_dataframe(markets: list[MarketDict]) -> pl.DataFrame:
                 "market_id": pl.String,
                 "title": pl.String,
                 "domain": pl.String,
+                "event_id": pl.String,
+                "tags": pl.String,
                 "resolution_ts": pl.String,
                 "resolved_outcome": pl.Float64,
                 "status": pl.String,
@@ -178,6 +184,8 @@ def markets_to_dataframe(markets: list[MarketDict]) -> pl.DataFrame:
         "market_id",
         "title",
         "domain",
+        "event_id",
+        "tags",
         "resolution_ts",
         "resolved_outcome",
         "status",
@@ -272,6 +280,56 @@ def _derive_domain(market: MarketDict) -> str:
         return _normalize_domain(category)
 
     return "general"
+
+
+def _extract_event_id(market: MarketDict) -> str | None:
+    for key in ("event_id", "eventId"):
+        candidate = market.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    events = market.get("events")
+    if not isinstance(events, list):
+        return None
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for key in ("id", "event_id", "eventId", "slug"):
+            candidate = event.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
+
+
+def _extract_market_tags(market: MarketDict) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+
+    def _add(candidate: Any) -> None:
+        if not isinstance(candidate, str):
+            return
+        tag = candidate.strip()
+        if not tag or tag in seen:
+            return
+        seen.add(tag)
+        tags.append(tag)
+
+    raw_tags = market.get("tags")
+    parsed_tags = _parse_json_list(raw_tags) if isinstance(raw_tags, str) else raw_tags
+    if isinstance(parsed_tags, list):
+        for item in parsed_tags:
+            if isinstance(item, dict):
+                for key in ("name", "label", "slug"):
+                    if key in item:
+                        _add(item.get(key))
+                        break
+            else:
+                _add(item)
+
+    category = market.get("category")
+    _add(category)
+    return tags
 
 
 def _iter_domain_candidates(value: Any) -> list[str]:

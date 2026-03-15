@@ -28,6 +28,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)").fetchall()}
     if "is_synthetic" not in columns:
         conn.execute("ALTER TABLE market_snapshots ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0")
+    market_columns = {row[1] for row in conn.execute("PRAGMA table_info(markets)").fetchall()}
+    if "event_id" not in market_columns:
+        conn.execute("ALTER TABLE markets ADD COLUMN event_id TEXT")
+    if "tags_json" not in market_columns:
+        conn.execute("ALTER TABLE markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets (event_id)")
     conn.commit()
 
 
@@ -45,6 +51,51 @@ def _coerce_iso8601(value: datetime | str | None) -> str | None:
     if isinstance(value, datetime):
         return isoformat(value)
     return value
+
+
+def _coerce_tags_json(value: Any) -> str:
+    if value is None:
+        return "[]"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "[]"
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return _json([stripped])
+        if isinstance(parsed, list):
+            return _json([str(item).strip() for item in parsed if str(item).strip()])
+        return "[]"
+    if isinstance(value, list | tuple | set):
+        return _json([str(item).strip() for item in value if str(item).strip()])
+    return "[]"
+
+
+def _parse_tags_json(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return []
+    else:
+        parsed = value
+    if not isinstance(parsed, list):
+        return []
+    tags: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        tag = str(item).strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+    return tags
 
 
 def _inserted_count(conn: sqlite3.Connection, total_changes_before: int) -> int:
@@ -86,6 +137,8 @@ def add_market(
     close_ts: datetime | None,
     resolution_ts: datetime | None,
     status: str,
+    event_id: str | None = None,
+    tags: list[str] | None = None,
     fees_enabled: bool = False,
     fee_rate: float = 0.0,
     fee_exponent: float = 0.0,
@@ -94,16 +147,18 @@ def add_market(
     conn.execute(
         """
         INSERT INTO markets (
-            market_id, title, domain, market_type, open_ts, close_ts,
+            market_id, title, domain, market_type, event_id, tags_json, open_ts, close_ts,
             resolution_ts, status, fees_enabled, fee_rate, fee_exponent,
             maker_rebate_rate
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             market_id,
             title,
             domain,
             market_type,
+            event_id,
+            _coerce_tags_json(tags),
             isoformat(open_ts),
             isoformat(close_ts) if close_ts else None,
             isoformat(resolution_ts) if resolution_ts else None,
@@ -123,6 +178,8 @@ def bulk_add_markets(conn: sqlite3.Connection, markets: list[dict[str, Any]]) ->
             market["title"],
             market["domain"],
             market["market_type"],
+            market.get("event_id"),
+            _coerce_tags_json(market.get("tags")),
             _coerce_iso8601(market["open_ts"]),
             _coerce_iso8601(market.get("close_ts")),
             _coerce_iso8601(market.get("resolution_ts")),
@@ -138,10 +195,10 @@ def bulk_add_markets(conn: sqlite3.Connection, markets: list[dict[str, Any]]) ->
     conn.executemany(
         """
         INSERT OR IGNORE INTO markets (
-            market_id, title, domain, market_type, open_ts, close_ts,
+            market_id, title, domain, market_type, event_id, tags_json, open_ts, close_ts,
             resolution_ts, status, fees_enabled, fee_rate, fee_exponent,
             maker_rebate_rate
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -414,6 +471,7 @@ def get_market_state_as_of(
             m.title,
             m.domain,
             m.market_type,
+            m.tags_json,
             m.resolution_ts,
             m.fees_enabled,
             m.fee_rate,
@@ -491,6 +549,7 @@ def get_market_state_as_of(
             )
             for level in levels
         ],
+        tags=_parse_tags_json(row["tags_json"]),
     )
 
 

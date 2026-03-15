@@ -128,6 +128,7 @@ class StrategyConfig:
         "momentum",
         "volume_breakout",
         "resolution_convergence",
+        "market_making",
     ]
     kelly_fraction: float
     edge_threshold_bps: float
@@ -176,6 +177,10 @@ class StrategyConfig:
     allowed_categories: list[str] | None = None
     # Category routing: None means no categories are blocked
     blocked_categories: list[str] | None = None
+    # Market making: total spread quoted around mid, in basis points
+    mm_spread_bps: float = 200.0
+    # Market making: maximum directional inventory in contracts
+    mm_max_inventory: float = 100.0
 
     def __post_init__(self) -> None:
         if not (0.0 < self.kelly_fraction <= 1.0):
@@ -196,6 +201,10 @@ class StrategyConfig:
             raise ValueError(
                 f"max_total_invested_pct must be in (0, 1], got {self.max_total_invested_pct}"
             )
+        if self.mm_spread_bps <= 0:
+            raise ValueError(f"mm_spread_bps must be > 0, got {self.mm_spread_bps}")
+        if self.mm_max_inventory <= 0:
+            raise ValueError(f"mm_max_inventory must be > 0, got {self.mm_max_inventory}")
         if self.carry_price_min >= self.carry_price_max:
             raise ValueError(
                 f"carry_price_min ({self.carry_price_min}) must be < carry_price_max ({self.carry_price_max})"

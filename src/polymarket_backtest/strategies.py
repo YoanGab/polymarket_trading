@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from .market_categories import has_any_category
 from .types import (
@@ -135,6 +136,7 @@ class StrategyEngine:
         starting_cash: float | None = None,
         total_invested: float | None = None,
         on_missed_trade: Callable[[float, str], None] | None = None,
+        related_market_prices: dict[str, dict[str, Any]] | None = None,
     ) -> list[OrderIntent]:
         if market.status not in {"active", "open"}:
             return []
@@ -179,6 +181,16 @@ class StrategyEngine:
             orders.extend(self._momentum(config, market, forecast, yes_position, available_cash))
         elif config.family == "volume_breakout":
             orders.extend(self._volume_breakout(config, market, forecast, yes_position, available_cash))
+        elif config.family == "market_making":
+            orders.extend(
+                self._market_making(
+                    config,
+                    market,
+                    yes_position,
+                    held_no_position,
+                    available_cash,
+                )
+            )
         elif config.family == "resolution_convergence":
             orders.extend(
                 self._resolution_convergence(
@@ -194,6 +206,91 @@ class StrategyEngine:
                     on_missed_trade=on_missed_trade,
                 )
             )
+        return orders
+
+    def _market_making(
+        self,
+        config: StrategyConfig,
+        market: MarketState,
+        yes_position: PositionState | None,
+        no_position: PositionState | None,
+        available_cash: float,
+    ) -> list[OrderIntent]:
+        yes_inventory = yes_position.quantity if yes_position is not None and yes_position.quantity > 0 else 0.0
+        no_inventory = no_position.quantity if no_position is not None and no_position.quantity > 0 else 0.0
+        net_yes_inventory = yes_inventory - no_inventory
+
+        half_spread = max(market.tick_size, (config.mm_spread_bps / 10_000.0) / 2.0)
+        inventory_ratio = max(-1.0, min(1.0, net_yes_inventory / max(config.mm_max_inventory, 1.0)))
+        inventory_skew = half_spread * inventory_ratio
+        quote_tick = max(market.tick_size, 0.001)
+
+        bid_price = normalized_contract_price(market.mid - half_spread - inventory_skew)
+        ask_price = normalized_contract_price(market.mid + half_spread + inventory_skew)
+        bid_price = min(bid_price, normalized_contract_price(max(0.001, market.best_ask - quote_tick)))
+        ask_price = max(ask_price, normalized_contract_price(min(0.999, market.best_bid + quote_tick)))
+        if bid_price >= ask_price:
+            bid_price = normalized_contract_price(max(0.001, market.mid - quote_tick))
+            ask_price = normalized_contract_price(min(0.999, market.mid + quote_tick))
+
+        quote_quantity = max(
+            MIN_ORDER_QUANTITY,
+            min(
+                config.mm_max_inventory * 0.1,
+                config.max_position_notional / max(market.mid, 0.05),
+            ),
+        )
+        buy_capacity = max(0.0, config.mm_max_inventory - max(0.0, net_yes_inventory))
+        buy_quantity = min(
+            quote_quantity,
+            buy_capacity,
+            available_cash / max(bid_price, 1e-9),
+        )
+        sell_quantity = quote_quantity
+
+        orders: list[OrderIntent] = []
+        maker_edge_bps = max(config.mm_spread_bps / 2.0, 0.0)
+
+        if buy_quantity >= MIN_ORDER_QUANTITY:
+            orders.append(
+                OrderIntent(
+                    strategy_name=config.name,
+                    market_id=market.market_id,
+                    ts=market.ts,
+                    side="buy",
+                    liquidity_intent="passive",
+                    limit_price=bid_price,
+                    requested_quantity=buy_quantity,
+                    kelly_fraction=config.kelly_fraction,
+                    edge_bps=maker_edge_bps,
+                    holding_period_minutes=config.max_holding_minutes,
+                    thesis=(
+                        "Market making bid: quote below mid to earn spread and maker rebate "
+                        f"(inventory={net_yes_inventory:.2f})"
+                    ),
+                )
+            )
+
+        if sell_quantity >= MIN_ORDER_QUANTITY:
+            orders.append(
+                OrderIntent(
+                    strategy_name=config.name,
+                    market_id=market.market_id,
+                    ts=market.ts,
+                    side="sell",
+                    liquidity_intent="passive",
+                    limit_price=ask_price,
+                    requested_quantity=sell_quantity,
+                    kelly_fraction=config.kelly_fraction,
+                    edge_bps=maker_edge_bps,
+                    holding_period_minutes=config.max_holding_minutes,
+                    thesis=(
+                        "Market making ask: quote above mid to earn spread and maker rebate "
+                        f"(inventory={net_yes_inventory:.2f})"
+                    ),
+                )
+            )
+
         return orders
 
     def _entry_cash_cap(

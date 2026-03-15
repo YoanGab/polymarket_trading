@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from . import db
+from .cross_market import CrossMarketTracker
 from .grok_replay import ReplayGrokClient
 from .market_categories import category_fee_settings, normalize_market_tags
 from .market_simulator import MarketSimulator, new_order_id
@@ -60,6 +61,7 @@ class ReplayEngine:
             strategy.name: StrategyPortfolio(cash=self.config.starting_cash) for strategy in self.strategies
         }
         self.strategy_engine = StrategyEngine()
+        self.cross_market = CrossMarketTracker(self.conn)
         self._strategy_by_name = {strategy.name: strategy for strategy in self.strategies}
         self._resolution_cache: dict[str, sqlite3.Row | None] = {}
         self._market_cache: dict[tuple[str, str], MarketState] = {}
@@ -246,7 +248,7 @@ class ReplayEngine:
         market_meta: dict[str, Any] = {}
         meta_rows = self.conn.execute(
             f"""
-            SELECT market_id, title, domain, market_type, resolution_ts,
+            SELECT market_id, title, domain, market_type, tags_json, resolution_ts,
                    fees_enabled, fee_rate, fee_exponent, maker_rebate_rate
             FROM markets
             {meta_filter}
@@ -334,6 +336,7 @@ class ReplayEngine:
                     fee_exponent=float(meta["fee_exponent"]),
                     maker_rebate_rate=float(meta["maker_rebate_rate"]),
                     orderbook=[],
+                    tags=self._decode_tags_json(meta["tags_json"]),
                 )
                 state = self._apply_market_category_metadata(state)
                 self._market_cache[(market_id, ts_str)] = state
@@ -381,7 +384,7 @@ class ReplayEngine:
 
     def _apply_market_category_metadata(self, market: MarketState) -> MarketState:
         market_categories = getattr(self, "market_categories", {})
-        tags = normalize_market_tags(market_categories.get(market.market_id, market.tags))
+        tags = normalize_market_tags([*market.tags, *market_categories.get(market.market_id, [])])
         fees_enabled, fee_rate = category_fee_settings(tags)
         return dc_replace(
             market,
@@ -389,6 +392,18 @@ class ReplayEngine:
             fees_enabled=fees_enabled,
             fee_rate=fee_rate,
         )
+
+    @staticmethod
+    def _decode_tags_json(raw_tags: Any) -> list[str]:
+        if not isinstance(raw_tags, str) or not raw_tags.strip():
+            return []
+        try:
+            parsed = json.loads(raw_tags)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return normalize_market_tags(str(tag) for tag in parsed)
 
     def _get_cached_market(self, market_id: str, timestamp: datetime) -> MarketState | None:
         """Look up a market state from cache, falling back to DB if needed."""
@@ -438,6 +453,31 @@ class ReplayEngine:
         start_index = max(0, current_index - lookback)
         return [snapshot for _, snapshot in history[start_index:current_index]]
 
+    def _build_related_market_prices(
+        self,
+        market_id: str,
+        timestamp: datetime,
+    ) -> dict[str, dict[str, Any]]:
+        related_market_prices: dict[str, dict[str, Any]] = {}
+        tracker = getattr(self, "cross_market", None)
+        if tracker is None:
+            return related_market_prices
+        for related in tracker.get_related_markets(market_id):
+            related_market = self._get_cached_market(related.market_id, timestamp)
+            if related_market is None:
+                continue
+            related_metadata = tracker.get_market_metadata(related.market_id)
+            related_market_prices[related.market_id] = {
+                "mid": related_market.mid,
+                "best_bid": related_market.best_bid,
+                "best_ask": related_market.best_ask,
+                "correlation": related.correlation,
+                "title": related_market.title,
+                "event_id": related_metadata.event_id if related_metadata is not None else None,
+                "tags": list(related_market.tags),
+            }
+        return related_market_prices
+
     def _process_market_snapshot(self, market_id: str, timestamp: datetime) -> None:
         if self._is_market_resolved_as_of(market_id, timestamp):
             logger.info(
@@ -459,6 +499,7 @@ class ReplayEngine:
         market = self._normalize_quotes(market)
         market = self._ensure_orderbook(market, reason="current_snapshot")
         history = self._get_market_history(market_id, timestamp, lookback=24)
+        related_market_prices = self._build_related_market_prices(market_id, timestamp)
 
         try:
             forecast, prompt_hash, context_hash = self.grok.forecast(
@@ -534,6 +575,7 @@ class ReplayEngine:
                         reason=reason,
                     )
                 ),
+                related_market_prices=related_market_prices,
             )
             for order in orders:
                 self._execute_order(
@@ -796,6 +838,20 @@ class ReplayEngine:
             if next_market is not None
             else self._build_degraded_next_market(market, order)
         )
+        if order.side == "sell":
+            position_key = _position_key(order.market_id, order.is_no_bet)
+            available_inventory = portfolio.positions.get(position_key)
+            available_quantity = available_inventory.quantity if available_inventory is not None else 0.0
+            if available_quantity < self.simulator.minimum_fill_quantity:
+                logger.info(
+                    "Skipping sell order for strategy=%s market_id=%s at ts=%s because inventory is empty",
+                    order.strategy_name,
+                    order.market_id,
+                    isoformat(order.ts),
+                )
+                return
+            if order.requested_quantity > available_quantity:
+                order = dc_replace(order, requested_quantity=available_quantity)
         effective_market = self.simulator._market_for_intent(market, order)
         effective_execution_next_market = self.simulator._market_for_intent(effective_next_market, order)
         fill_estimate = (
