@@ -25,43 +25,33 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 
 
-def make_env(split: str = "train"):
-    """Create a single-market Polymarket gym environment."""
-    # Get liquid market IDs for the split
-    from polymarket_backtest import db
-    from polymarket_backtest.gym_env import PolymarketGymEnv
+def make_env(split: str = "train", n_markets: int = 5):
+    """Create multi-market gym env (fast, pre-cached market states)."""
+    from polymarket_backtest.gym_env_multi import PolymarketMultiMarketGymEnv
     from polymarket_backtest.splits import HOLDOUT_CUTOFF, TRAIN_CUTOFF, VAL_CUTOFF
 
-    conn = db.connect(DB_PATH)
-    if split == "train":
-        condition = f"AND m.resolution_ts < '{TRAIN_CUTOFF}'"
-    elif split == "val":
-        condition = f"AND m.resolution_ts >= '{TRAIN_CUTOFF}' AND m.resolution_ts < '{VAL_CUTOFF}'"
-    else:
-        condition = f"AND m.resolution_ts >= '{VAL_CUTOFF}' AND m.resolution_ts < '{HOLDOUT_CUTOFF}'"
+    class _PPOEnv(PolymarketMultiMarketGymEnv):
+        def _market_ids_for_split(self, split_name: str) -> list[str]:
+            n = max(self.n_markets * 100, 500)
+            if split_name == "train":
+                cond = f"WHERE resolution_ts IS NOT NULL AND resolution_ts < '{TRAIN_CUTOFF}'"
+            elif split_name == "val":
+                cond = f"WHERE resolution_ts IS NOT NULL AND resolution_ts >= '{TRAIN_CUTOFF}' AND resolution_ts < '{VAL_CUTOFF}'"
+            elif split_name == "test":
+                cond = f"WHERE resolution_ts IS NOT NULL AND resolution_ts >= '{VAL_CUTOFF}' AND resolution_ts < '{HOLDOUT_CUTOFF}'"
+            else:
+                raise ValueError(f"Unknown split {split_name!r}")
+            rows = self.conn.execute(f"SELECT market_id FROM markets {cond} ORDER BY RANDOM() LIMIT ?", (n,)).fetchall()
+            return [str(r["market_id"]) for r in rows]
 
-    rows = conn.execute(
-        f"""
-        SELECT m.market_id
-        FROM markets m
-        JOIN market_resolutions mr ON mr.market_id = m.market_id
-        WHERE 1=1 {condition}
-        ORDER BY RANDOM()
-        LIMIT 500
-        """
-    ).fetchall()
-    market_ids = [str(r["market_id"]) for r in rows]
-    conn.close()
+        def step(self, action):
+            try:
+                return super().step(action)
+            except AssertionError:
+                obs, info = self.reset()
+                return obs, -10.0, True, False, info
 
-    if not market_ids:
-        raise ValueError(f"No markets found for split {split}")
-
-    return PolymarketGymEnv(
-        db_path=str(DB_PATH),
-        starting_cash=1000,
-        market_ids=market_ids,
-        split=split,
-    )
+    return _PPOEnv(db_path=str(DB_PATH), starting_cash=1000, n_markets=n_markets, split=split)
 
 
 def train(split: str = "train", timeout_seconds: int = 300, eval_only: bool = False):
@@ -90,20 +80,20 @@ def train(split: str = "train", timeout_seconds: int = 300, eval_only: bool = Fa
         print(f"Loaded PPO policy from {policy_path}", flush=True)
     else:
         model = PPO(
-            "MlpPolicy",
+            "MultiInputPolicy",
             env,
             learning_rate=3e-4,
-            n_steps=256,
+            n_steps=128,
             batch_size=64,
-            n_epochs=10,
+            n_epochs=5,
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.01,
+            ent_coef=0.02,
             vf_coef=0.5,
             max_grad_norm=0.5,
             policy_kwargs={"net_arch": [128, 128]},
-            verbose=0,
+            verbose=1,
         )
 
     start = time.monotonic()
@@ -130,10 +120,9 @@ def train(split: str = "train", timeout_seconds: int = 300, eval_only: bool = Fa
         done = False
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(int(action))
+            obs, reward, terminated, truncated, info = env.step(action)
             ep_return += float(reward)
-            if int(action) != 0:
-                ep_trades += 1
+            ep_trades += int(np.sum(action != 0))
             done = terminated or truncated
         episode_returns.append(ep_return)
         episode_trades.append(ep_trades)
