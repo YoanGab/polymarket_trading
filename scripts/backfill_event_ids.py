@@ -129,8 +129,9 @@ def main() -> None:
         print(f"ERROR: {db_path} not found")
         sys.exit(1)
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
 
     # Pre-check
     total = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
