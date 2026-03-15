@@ -55,6 +55,10 @@ class InvariantViolation:
 violations: list[InvariantViolation] = []
 min_cash_by_strategy: dict[str, float] = {}
 check_count = 0
+fill_count_buy = 0
+fill_count_sell = 0
+settlement_count = 0
+redemption_count = 0
 
 
 def check_invariants(
@@ -154,7 +158,12 @@ def patch_replay_engine() -> None:
     def patched_apply_fill(
         self: ReplayEngine, portfolio: Any, fill: Any, thesis: str, entry_probability: float, *, is_no_bet: bool = False
     ) -> None:
+        global fill_count_buy, fill_count_sell
         original_apply_fill(self, portfolio, fill, thesis, entry_probability, is_no_bet=is_no_bet)
+        if fill.side == "buy":
+            fill_count_buy += 1
+        else:
+            fill_count_sell += 1
         ts_str = fill.fill_ts.isoformat() if hasattr(fill.fill_ts, "isoformat") else str(fill.fill_ts)
         check_invariants(self, f"after_fill({fill.side})", fill.market_id, ts_str)
 
@@ -164,6 +173,21 @@ def patch_replay_engine() -> None:
     original_settle = ReplayEngine._settle_resolved_positions
 
     def patched_settle(self: ReplayEngine, replay_ts: Any) -> None:
+        global settlement_count
+        # Count positions that actually get settled this call
+        for strat in self.strategies:
+            pf = self.portfolios[strat.name]
+            for pos in pf.positions.values():
+                if pos.quantity > 0:
+                    resolution = self._get_resolution(pos.market_id)
+                    if resolution is not None and resolution["resolution_ts"] is not None:
+                        from datetime import datetime
+
+                        from polymarket_backtest.types import ensure_utc
+
+                        resolution_ts = datetime.fromisoformat(str(resolution["resolution_ts"]))
+                        if ensure_utc(replay_ts) >= ensure_utc(resolution_ts):
+                            settlement_count += 1
         original_settle(self, replay_ts)
         ts_str = replay_ts.isoformat() if hasattr(replay_ts, "isoformat") else str(replay_ts)
         check_invariants(self, "after_settlement", "all_markets", ts_str)
@@ -174,7 +198,10 @@ def patch_replay_engine() -> None:
     original_redeem = ReplayEngine._redeem_matched_pairs
 
     def patched_redeem(self: ReplayEngine, *, portfolio: Any, strategy_name: str, market: Any) -> float:
+        global redemption_count
         result = original_redeem(self, portfolio=portfolio, strategy_name=strategy_name, market=market)
+        if result > 0:
+            redemption_count += 1
         ts_str = market.ts.isoformat() if hasattr(market.ts, "isoformat") else str(market.ts)
         check_invariants(self, "after_redemption", market.market_id, ts_str)
         return result
@@ -246,6 +273,10 @@ def main() -> None:
     print("STRESS TEST RESULTS")
     print("=" * 72)
     print(f"Total invariant checks performed: {check_count:,}")
+    print(f"Total buy fills:  {fill_count_buy:,}")
+    print(f"Total sell fills: {fill_count_sell:,}")
+    print(f"Total settlements: {settlement_count:,}")
+    print(f"Total redemptions: {redemption_count:,}")
     print()
 
     # Min cash summary

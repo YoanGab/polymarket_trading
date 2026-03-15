@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from . import db
+from .splits import TRAIN_CUTOFF, VAL_CUTOFF, get_split
 
 MOMENTUM_LOOKBACKS = (3, 6, 12, 24, 72, 168)
 MAX_FEATURE_LOOKBACK = 720
@@ -66,12 +67,15 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
         "extreme_x_volume": abs(mid - 0.5) * (volume_1m / max(volume_24h / 24.0, 1.0)),  # extreme + volume spike
     }
 
-    # Resolution proximity
-    resolution_ts_str = row["resolution_ts"] if "resolution_ts" in row.keys() else None
+    # Resolution proximity — prefer scheduled_close_ts (known in advance) over resolution_ts
+    row_keys = row.keys()
+    scheduled_ts_str = row["scheduled_close_ts"] if "scheduled_close_ts" in row_keys else None
+    resolution_ts_str = row["resolution_ts"] if "resolution_ts" in row_keys else None
+    close_ts_str = scheduled_ts_str or resolution_ts_str
     ts_str = row["ts"]
-    if resolution_ts_str and ts_str:
+    if close_ts_str and ts_str:
         try:
-            res_dt = datetime.fromisoformat(str(resolution_ts_str).replace("Z", "+00:00"))
+            res_dt = datetime.fromisoformat(str(close_ts_str).replace("Z", "+00:00"))
             snap_dt = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
             hours_to_res = max(0, (res_dt - snap_dt).total_seconds() / 3600)
             features["hours_to_resolution"] = hours_to_res
@@ -252,10 +256,14 @@ class WalkForwardSplit:
 
 def walk_forward_split(
     dataset: FeatureSet,
-    train_cutoff: str = "2025-10-01",
-    val_cutoff: str = "2026-01-01",
+    train_cutoff: str = TRAIN_CUTOFF,
+    val_cutoff: str = VAL_CUTOFF,
+    resolution_ts_by_market: dict[str, str | None] | None = None,
 ) -> WalkForwardSplit:
-    """Split dataset chronologically by market resolution time.
+    """Split dataset chronologically using the canonical split function.
+
+    Uses ``get_split`` from ``splits.py`` when ``resolution_ts_by_market`` is
+    provided.  Falls back to the last snapshot timestamp per market otherwise.
 
     Fixed date cutoffs (not percentage-based) for reproducibility:
     - Train: markets resolved before train_cutoff (≤ Q3 2025) — ~63K markets
@@ -263,25 +271,31 @@ def walk_forward_split(
     - Test: markets resolved after val_cutoff (2026+) — ~74K markets
     No data leakage — test markets resolved after all training markets.
     """
-    # Group by market_id, find last timestamp per market
-    market_last_ts: dict[str, str] = {}
-    for mid, ts in zip(dataset.market_ids, dataset.timestamps):
-        if mid not in market_last_ts or ts > market_last_ts[mid]:
-            market_last_ts[mid] = ts
-
-    # Split by fixed date cutoffs
-    train_set: set[str] = set()
-    val_set: set[str] = set()
-    test_set: set[str] = set()
-    for mid, ts in market_last_ts.items():
-        if ts < train_cutoff:
-            train_set.add(mid)
-        elif ts < val_cutoff:
-            val_set.add(mid)
-        else:
-            test_set.add(mid)
+    # Determine the split timestamp for each market_id
+    if resolution_ts_by_market is not None:
+        market_split: dict[str, str] = {}
+        for mid in set(dataset.market_ids):
+            market_split[mid] = get_split(resolution_ts_by_market.get(mid))
+    else:
+        # Fallback: group by market_id, use last timestamp per market
+        market_last_ts: dict[str, str] = {}
+        for mid, ts in zip(dataset.market_ids, dataset.timestamps):
+            if mid not in market_last_ts or ts > market_last_ts[mid]:
+                market_last_ts[mid] = ts
+        market_split = {}
+        for mid, ts in market_last_ts.items():
+            if ts < train_cutoff:
+                market_split[mid] = "train"
+            elif ts < val_cutoff:
+                market_split[mid] = "val"
+            else:
+                market_split[mid] = "test"
 
     # Build index masks
+    train_set = {mid for mid, s in market_split.items() if s == "train"}
+    val_set = {mid for mid, s in market_split.items() if s == "val"}
+    test_set = {mid for mid, s in market_split.items() if s == "test"}
+
     train_mask = [mid in train_set for mid in dataset.market_ids]
     val_mask = [mid in val_set for mid in dataset.market_ids]
     test_mask = [mid in test_set for mid in dataset.market_ids]

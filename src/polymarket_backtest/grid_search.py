@@ -20,6 +20,7 @@ from .market_categories import (
 )
 from .metrics import build_metrics_summary, persist_metric_results
 from .replay_engine import ReplayEngine
+from .splits import HOLDOUT_CUTOFF, TRAIN_CUTOFF, VAL_CUTOFF, get_split
 from .types import ReplayConfig, StrategyConfig, dc_asdict
 
 DEFAULT_LOOKBACK_MINUTES = 240
@@ -77,7 +78,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             aggressive_entry=True,
             blocked_categories=fee_free_blocklist,
         ),
-
         # Crypto markets: shorter windows and higher edge requirements to absorb 25 bps fees.
         StrategyConfig(
             name="crypto_resolution_day",
@@ -122,7 +122,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             aggressive_entry=True,
             allowed_categories=crypto_only,
         ),
-
         # Sports markets: fast resolution and tighter exposure limits.
         StrategyConfig(
             name="sports_resolution_day",
@@ -203,6 +202,7 @@ def _stratified_market_sample(
     max_snapshots: int = 2000,
     seed: int = 42,
     split: str | None = None,
+    allow_holdout: bool = False,
 ) -> list[str]:
     """Sample markets with stratified random selection by duration bucket.
 
@@ -210,14 +210,24 @@ def _stratified_market_sample(
         split: If set, restrict to markets in this chronological split:
             "train" (resolved < 2025-10-01), "val" (Oct-Dec 2025),
             "test" (resolved >= 2026-01-01), or None (all markets).
+        allow_holdout: If False (default), raise an error when split="holdout".
+            Pass True only with --final-eval.
+
+    Raises:
+        ValueError: If split is "holdout" and allow_holdout is False.
     """
+    if split == "holdout" and not allow_holdout:
+        raise ValueError("Holdout set is locked. Use --final-eval to unlock.")
+
     split_filter = ""
     if split == "train":
-        split_filter = "AND m.resolution_ts < '2025-10-01'"
+        split_filter = f"AND m.resolution_ts < '{TRAIN_CUTOFF}'"
     elif split == "val":
-        split_filter = "AND m.resolution_ts >= '2025-10-01' AND m.resolution_ts < '2026-01-01'"
+        split_filter = f"AND m.resolution_ts >= '{TRAIN_CUTOFF}' AND m.resolution_ts < '{VAL_CUTOFF}'"
     elif split == "test":
-        split_filter = "AND m.resolution_ts >= '2026-01-01'"
+        split_filter = f"AND m.resolution_ts >= '{VAL_CUTOFF}' AND m.resolution_ts < '{HOLDOUT_CUTOFF}'"
+    elif split == "holdout":
+        split_filter = f"AND m.resolution_ts >= '{HOLDOUT_CUTOFF}'"
 
     # Two-phase approach to avoid GROUP BY on 68M rows (63s → <1s):
     # Phase 1: Get candidate market_ids from small tables (markets + resolutions)
