@@ -141,6 +141,13 @@ class PolymarketMultiMarketGymEnv(gym.Env[dict[str, np.ndarray], np.ndarray]):
         if not self._all_market_ids:
             raise ValueError(f"No markets available for split {split!r}")
 
+        # Pre-compute market time ranges (ONE query at init, used for all
+        # subsequent _candidates_at / _pick_episode_start calls).
+        self._market_ranges: dict[str, tuple[str, str, str | None]] = {}
+        self._global_min_ts: datetime | None = None
+        self._global_max_ts: datetime | None = None
+        self._precompute_market_ranges()
+
         # Active episode tracking
         self._episodes: dict[str, _MarketEpisode] = {}
         self._slot_market_ids: list[str | None] = [None] * n_markets
@@ -463,85 +470,52 @@ class PolymarketMultiMarketGymEnv(gym.Env[dict[str, np.ndarray], np.ndarray]):
                     break
 
     def _candidates_at(self, ts: datetime) -> list[str]:
-        """Return market IDs that have snapshots around the given timestamp."""
+        """Return market IDs that have snapshots around the given timestamp.
+
+        Uses the pre-computed ``_market_ranges`` dict for O(N) in-memory
+        filtering instead of a full database scan.
+        """
         ts_iso = ensure_utc(ts).isoformat()
-        # Use temp table for large market sets (SQLite IN clause limit = 999)
-        if len(self._all_market_ids) > 900:
-            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS _mm_candidates (market_id TEXT PRIMARY KEY)")
-            self.conn.execute("DELETE FROM _mm_candidates")
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO _mm_candidates VALUES (?)", [(m,) for m in self._all_market_ids]
-            )
-            rows = self.conn.execute(
-                """
-                SELECT DISTINCT s.market_id
-                FROM market_snapshots s
-                JOIN markets m ON m.market_id = s.market_id
-                JOIN _mm_candidates c ON c.market_id = s.market_id
-                WHERE s.ts <= ? AND (m.resolution_ts IS NULL OR m.resolution_ts > ?)
-                """,
-                (ts_iso, ts_iso),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                """
-                SELECT DISTINCT s.market_id
-                FROM market_snapshots s
-                JOIN markets m ON m.market_id = s.market_id
-                WHERE s.market_id IN ({})
-                  AND s.ts <= ?
-                  AND (m.resolution_ts IS NULL OR m.resolution_ts > ?)
-                """.format(",".join("?" * len(self._all_market_ids))),
-                (*self._all_market_ids, ts_iso, ts_iso),
-            ).fetchall()
-        return [str(row["market_id"]) for row in rows]
+        result: list[str] = []
+        for mid, (min_ts, _max_ts, res_ts) in self._market_ranges.items():
+            # Market must have at least one snapshot <= ts
+            if min_ts > ts_iso:
+                continue
+            # Market must not have resolved before ts
+            if res_ts is not None and res_ts <= ts_iso:
+                continue
+            result.append(mid)
+        return result
 
     def _has_replacement_candidates(self) -> bool:
-        """Check if there are any markets available to fill empty slots."""
+        """Check if there are any markets available to fill empty slots.
+
+        Uses ``_candidates_at`` which is now an in-memory operation.
+        """
         ts = self._latest_timestamp()
         if ts is None:
             return False
         used = {m for m in self._slot_market_ids if m is not None}
-        candidates = self._candidates_at(ts)
-        return any(c not in used for c in candidates)
+        return any(c not in used for c in self._candidates_at(ts))
 
     # ------------------------------------------------------------------
     # Episode timing
     # ------------------------------------------------------------------
 
     def _pick_episode_start(self, options: dict[str, Any] | None) -> datetime:
-        """Pick a random start time within the split's data range."""
+        """Pick a random start time within the split's data range.
+
+        Uses the pre-computed ``_global_min_ts`` / ``_global_max_ts`` so this
+        is a pure in-memory operation (no database access).
+        """
         if options is not None and "start_ts" in options:
             return ensure_utc(options["start_ts"])
 
-        # Find the time range of available data
-        if len(self._all_market_ids) > 900:
-            # Temp table already created by _candidates_at or create now
-            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS _mm_candidates (market_id TEXT PRIMARY KEY)")
-            self.conn.execute("DELETE FROM _mm_candidates")
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO _mm_candidates VALUES (?)", [(m,) for m in self._all_market_ids]
-            )
-            row = self.conn.execute(
-                "SELECT MIN(s.ts) AS min_ts, MAX(s.ts) AS max_ts "
-                "FROM market_snapshots s JOIN _mm_candidates c ON c.market_id = s.market_id"
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                """
-                SELECT MIN(ts) AS min_ts, MAX(ts) AS max_ts
-                FROM market_snapshots
-                WHERE market_id IN ({})
-                """.format(",".join("?" * len(self._all_market_ids))),
-                self._all_market_ids,
-            ).fetchone()
-        if row is None or row["min_ts"] is None:
+        if self._global_min_ts is None or self._global_max_ts is None:
             raise ValueError("No snapshot data available")
 
-        min_ts = datetime.fromisoformat(str(row["min_ts"]))
-        max_ts = datetime.fromisoformat(str(row["max_ts"]))
-        min_ts = ensure_utc(min_ts)
-        max_ts = ensure_utc(max_ts)
+        min_ts = self._global_min_ts
+        max_ts = self._global_max_ts
 
         # Ensure room for at least one episode
         latest_start = max_ts - timedelta(hours=self.episode_hours)
@@ -626,6 +600,70 @@ class PolymarketMultiMarketGymEnv(gym.Env[dict[str, np.ndarray], np.ndarray]):
             params,
         ).fetchall()
         return [str(row["market_id"]) for row in rows]
+
+    def _precompute_market_ranges(self) -> None:
+        """Load (min_ts, max_ts, resolution_ts) for every split market in ONE query.
+
+        Populates ``self._market_ranges`` and the global min/max timestamps so
+        that ``_candidates_at`` and ``_pick_episode_start`` can work entirely
+        in-memory without touching the database.
+        """
+        market_ids = self._all_market_ids
+        if not market_ids:
+            return
+
+        # Use a temp table when the market set exceeds SQLite's variable limit.
+        if len(market_ids) > 900:
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS _mm_ranges_tmp (market_id TEXT PRIMARY KEY)")
+            self.conn.execute("DELETE FROM _mm_ranges_tmp")
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO _mm_ranges_tmp VALUES (?)",
+                [(m,) for m in market_ids],
+            )
+            rows = self.conn.execute(
+                """
+                SELECT s.market_id,
+                       MIN(s.ts) AS min_ts,
+                       MAX(s.ts) AS max_ts,
+                       m.resolution_ts
+                FROM market_snapshots s
+                JOIN markets m ON m.market_id = s.market_id
+                JOIN _mm_ranges_tmp t ON t.market_id = s.market_id
+                GROUP BY s.market_id
+                """
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" * len(market_ids))
+            rows = self.conn.execute(
+                f"""
+                SELECT s.market_id,
+                       MIN(s.ts) AS min_ts,
+                       MAX(s.ts) AS max_ts,
+                       m.resolution_ts
+                FROM market_snapshots s
+                JOIN markets m ON m.market_id = s.market_id
+                WHERE s.market_id IN ({placeholders})
+                GROUP BY s.market_id
+                """,
+                tuple(market_ids),
+            ).fetchall()
+
+        global_min: str | None = None
+        global_max: str | None = None
+        for r in rows:
+            mid = str(r["market_id"])
+            min_ts_str = str(r["min_ts"])
+            max_ts_str = str(r["max_ts"])
+            res_ts_str = str(r["resolution_ts"]) if r["resolution_ts"] is not None else None
+            self._market_ranges[mid] = (min_ts_str, max_ts_str, res_ts_str)
+            if global_min is None or min_ts_str < global_min:
+                global_min = min_ts_str
+            if global_max is None or max_ts_str > global_max:
+                global_max = max_ts_str
+
+        if global_min is not None and global_max is not None:
+            self._global_min_ts = ensure_utc(datetime.fromisoformat(global_min))
+            self._global_max_ts = ensure_utc(datetime.fromisoformat(global_max))
 
 
 def _safe_value(value: float | None, scale: float = 1.0) -> float:
