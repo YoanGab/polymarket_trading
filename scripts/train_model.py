@@ -334,8 +334,9 @@ def train_xgboost(
     val_X: np.ndarray,
     val_y: np.ndarray,
 ) -> object:
-    """Train XGBoost with strong regularization."""
+    """Train multi-seed XGBoost ensemble with isotonic calibration."""
     import xgboost as xgb
+    from sklearn.isotonic import IsotonicRegression
     from sklearn.preprocessing import StandardScaler
 
     scaler = StandardScaler()
@@ -345,7 +346,7 @@ def train_xgboost(
     dtrain = xgb.DMatrix(X_scaled, label=train_y)
     dval = xgb.DMatrix(val_scaled, label=val_y)
 
-    params = {
+    base_params = {
         "objective": "binary:logistic",
         "eval_metric": "logloss",
         "eta": 0.02,
@@ -355,27 +356,31 @@ def train_xgboost(
         "colsample_bytree": 0.5,
         "reg_alpha": 2.0,
         "reg_lambda": 10.0,
-        "seed": 42,
     }
 
-    model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=1200,
-        evals=[(dval, "val")],
-        early_stopping_rounds=120,
-        verbose_eval=False,
-    )
+    # Train 3 models with different seeds, average predictions
+    seeds = [42, 123, 7]
+    models = []
+    for seed in seeds:
+        params = {**base_params, "seed": seed}
+        model = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=1200,
+            evals=[(dval, "val")],
+            early_stopping_rounds=120,
+            verbose_eval=False,
+        )
+        models.append(model)
+        print(f"  XGBoost seed={seed}: best_iteration={model.best_iteration}", flush=True)
 
-    # Isotonic calibration on validation set
-    from sklearn.isotonic import IsotonicRegression
-
-    raw_val_preds = model.predict(dval)
+    # Average predictions for calibration
+    raw_val_preds = np.mean([m.predict(dval) for m in models], axis=0)
     calibrator = IsotonicRegression(y_min=0.001, y_max=0.999, out_of_bounds="clip")
     calibrator.fit(raw_val_preds, val_y)
-    print(f"  XGBoost: applied isotonic calibration on {len(val_y)} val samples")
+    print(f"  XGBoost ensemble: {len(seeds)} seeds, isotonic calibration on {len(val_y)} val samples")
 
-    return {"xgb_model": model, "scaler": scaler, "calibrator": calibrator}
+    return {"xgb_model": models, "scaler": scaler, "calibrator": calibrator}
 
 
 def train_catboost(
@@ -982,7 +987,11 @@ def predict(model: object, X: np.ndarray) -> np.ndarray:
 
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
-        raw = model["xgb_model"].predict(dmat)
+        xgb_model = model["xgb_model"]
+        if isinstance(xgb_model, list):
+            raw = np.mean([m.predict(dmat) for m in xgb_model], axis=0)
+        else:
+            raw = xgb_model.predict(dmat)
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         return np.clip(raw, 0.001, 0.999)

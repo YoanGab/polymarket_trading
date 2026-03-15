@@ -149,7 +149,11 @@ def _predict_model(model: object, X: np.ndarray) -> np.ndarray:
 
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
-        raw = model["xgb_model"].predict(dmat)
+        xgb_model = model["xgb_model"]
+        if isinstance(xgb_model, list):
+            raw = np.mean([m.predict(dmat) for m in xgb_model], axis=0)
+        else:
+            raw = xgb_model.predict(dmat)
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         return np.clip(raw, 0.001, 0.999)
