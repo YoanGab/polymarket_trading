@@ -1115,20 +1115,6 @@ def main() -> None:
         "volatility_24h",
         "volume_trend",
         "price_range_24h",
-        # Longer-horizon momentum — available via prev_snapshots
-        "momentum_72h",
-        "momentum_72h_pct",
-        "momentum_168h",
-        "momentum_168h_pct",
-        # Longer-horizon volatility/range — available via prev_snapshots
-        "volatility_168h",
-        "price_range_168h",
-        "price_vs_mean_168h",
-        # 720h features — available via prev_snapshots
-        "price_range_720h",
-        "price_vs_mean_720h",
-        "distance_to_720h_high",
-        "distance_to_720h_low",
         # Tag features — available via market.tags in context_bundle
         "n_tags",
     }
