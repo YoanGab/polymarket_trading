@@ -6,6 +6,7 @@ every minute.
 
 Usage:
     uv run python scripts/scrape_orderbook.py          # one-shot scrape
+    uv run python scripts/scrape_orderbook.py --limit 60
     uv run python scripts/scrape_orderbook.py --loop    # continuous (every 60s)
     uv run python scripts/scrape_orderbook.py --stats   # print stored stats
 
@@ -77,8 +78,10 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def get_top_markets(client: httpx.Client, n: int = TOP_N_MARKETS) -> list[dict]:
+def get_top_markets(client: httpx.Client, n: int | None = None) -> list[dict]:
     """Fetch top N active markets by 24h volume from Gamma API."""
+    if n is None:
+        n = TOP_N_MARKETS
     resp = client.get(
         f"{GAMMA_API}/markets",
         params={
@@ -134,13 +137,13 @@ def analyze_book(book: dict) -> dict:
     }
 
 
-def scrape_once(conn: sqlite3.Connection) -> int:
+def scrape_once(conn: sqlite3.Connection, *, market_limit: int | None = None) -> int:
     """Scrape orderbooks for top markets. Returns number of snapshots saved."""
     now = datetime.now(tz=UTC).isoformat()
     saved = 0
 
     with httpx.Client(timeout=HTTP_TIMEOUT, headers={"User-Agent": "PolymarketBot/1.0"}) as client:
-        markets = get_top_markets(client)
+        markets = get_top_markets(client, n=market_limit)
         print(f"[{now}] Fetched {len(markets)} markets from Gamma API")
 
         for market in markets:
@@ -285,9 +288,30 @@ def print_stats(conn: sqlite3.Connection) -> None:
             print(f"  {ts} | bid={bb:.3f} ask={ba:.3f} spread={sp:.3f} | bid${bd:>10,.0f} ask${ad:>10,.0f}")
 
 
+def parse_market_limit(args: list[str]) -> int | None:
+    """Parse optional --limit N argument."""
+    if "--limit" not in args:
+        return None
+
+    idx = args.index("--limit")
+    if idx + 1 >= len(args):
+        raise SystemExit("--limit requires an integer value")
+
+    try:
+        limit = int(args[idx + 1])
+    except ValueError as exc:
+        raise SystemExit("--limit requires an integer value") from exc
+
+    if limit <= 0:
+        raise SystemExit("--limit must be greater than zero")
+
+    return limit
+
+
 def main() -> None:
     args = sys.argv[1:]
     conn = init_db(DB_PATH)
+    market_limit = parse_market_limit(args)
 
     if "--stats" in args:
         print_stats(conn)
@@ -295,12 +319,12 @@ def main() -> None:
         print(f"Starting continuous scrape (every 60s). DB: {DB_PATH}")
         while True:
             try:
-                scrape_once(conn)
+                scrape_once(conn, market_limit=market_limit)
             except Exception as e:
                 print(f"Scrape error: {e}")
             time.sleep(60)
     else:
-        scrape_once(conn)
+        scrape_once(conn, market_limit=market_limit)
 
     conn.close()
 
