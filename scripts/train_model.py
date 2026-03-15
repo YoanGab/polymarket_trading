@@ -108,7 +108,14 @@ def train_logistic(train_X: np.ndarray, train_y: np.ndarray) -> object:
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(train_X)
 
-    model = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+    model = LogisticRegression(
+        penalty="elasticnet",
+        C=0.5,
+        l1_ratio=0.3,
+        solver="saga",
+        max_iter=2000,
+        random_state=42,
+    )
     model.fit(X_scaled, train_y)
 
     # Return both scaler and model
