@@ -42,6 +42,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             max_position_notional=400.0,
             max_holding_minutes=10080,  # 7 days
             min_confidence=0.60,
+            max_portfolio_pct=0.20,  # human feedback: reduce from 0.50
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
@@ -56,6 +57,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             max_position_notional=500.0,
             max_holding_minutes=10080,
             min_confidence=0.65,
+            max_portfolio_pct=0.20,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
@@ -70,6 +72,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             max_position_notional=600.0,
             max_holding_minutes=10080,
             min_confidence=0.68,
+            max_portfolio_pct=0.25,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
