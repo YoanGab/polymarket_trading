@@ -125,6 +125,7 @@ class StrategyConfig:
         "carry_only",
         "news_driven",
         "edge_based",
+        "sell_edge",
         "arbitrage",
         "mean_reversion",
         "contrarian",
