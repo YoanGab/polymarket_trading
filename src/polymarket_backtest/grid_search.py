@@ -33,21 +33,35 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
     sports_only = list(SPORTS_CATEGORY_TAGS)
 
     return [
-        # Sell-edge: buy NO when model says YES is overpriced (no sports)
+        # Sell-edge: low threshold for more trades
         StrategyConfig(
-            name="sell_edge_no_sports",
+            name="sell_edge_wide",
+            family="sell_edge",
+            kelly_fraction=0.10,
+            edge_threshold_bps=50.0,
+            max_position_notional=400.0,
+            max_holding_minutes=10080,  # 7 days
+            min_confidence=0.60,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+            aggressive_entry=True,
+            blocked_categories=sports_only,
+        ),
+        # Sell-edge: moderate threshold
+        StrategyConfig(
+            name="sell_edge_moderate",
             family="sell_edge",
             kelly_fraction=0.15,
             edge_threshold_bps=100.0,
             max_position_notional=500.0,
-            max_holding_minutes=10080,  # 7 days
+            max_holding_minutes=10080,
             min_confidence=0.65,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
             blocked_categories=sports_only,
         ),
-        # Sell-edge: higher threshold for stronger signals
+        # Sell-edge: high conviction
         StrategyConfig(
             name="sell_edge_conviction",
             family="sell_edge",
@@ -59,19 +73,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
-            blocked_categories=sports_only,
-        ),
-        # Also keep edge_based for comparison
-        StrategyConfig(
-            name="edge_no_sports",
-            family="edge_based",
-            kelly_fraction=0.15,
-            edge_threshold_bps=100.0,
-            max_position_notional=500.0,
-            max_holding_minutes=10080,
-            min_confidence=0.68,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
             blocked_categories=sports_only,
         ),
     ]
