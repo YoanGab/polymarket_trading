@@ -113,31 +113,32 @@ def get_event_outcome_tokens_map(
     if not unique_market_ids:
         return {}
 
-    placeholders = ", ".join("?" for _ in unique_market_ids)
-    rows = conn.execute(
-        f"""
-        SELECT
-            base.market_id AS base_market_id,
-            sibling.market_id AS outcome_market_id
-        FROM markets base
-        JOIN markets sibling
-          ON sibling.event_id = base.event_id
-        WHERE base.market_id IN ({placeholders})
-          AND base.event_id IS NOT NULL
-        ORDER BY
-            base.market_id,
-            CASE WHEN sibling.market_id = base.market_id THEN 0 ELSE 1 END,
-            sibling.title COLLATE NOCASE,
-            sibling.market_id
-        """,
-        tuple(unique_market_ids),
-    ).fetchall()
-
     outcome_tokens_by_market: dict[str, list[str]] = {}
-    for row in rows:
-        base_market_id = str(row["base_market_id"])
-        outcome_market_id = str(row["outcome_market_id"])
-        outcome_tokens_by_market.setdefault(base_market_id, []).append(outcome_market_id)
+    for start in range(0, len(unique_market_ids), 900):
+        chunk = unique_market_ids[start : start + 900]
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT
+                base.market_id AS base_market_id,
+                sibling.market_id AS outcome_market_id
+            FROM markets base
+            JOIN markets sibling
+              ON sibling.event_id = base.event_id
+            WHERE base.market_id IN ({placeholders})
+              AND base.event_id IS NOT NULL
+            ORDER BY
+                base.market_id,
+                CASE WHEN sibling.market_id = base.market_id THEN 0 ELSE 1 END,
+                sibling.title COLLATE NOCASE,
+                sibling.market_id
+            """,
+            tuple(chunk),
+        ).fetchall()
+        for row in rows:
+            base_market_id = str(row["base_market_id"])
+            outcome_market_id = str(row["outcome_market_id"])
+            outcome_tokens_by_market.setdefault(base_market_id, []).append(outcome_market_id)
     return outcome_tokens_by_market
 
 

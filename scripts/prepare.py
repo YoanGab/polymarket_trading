@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from polymarket_backtest import db
-from polymarket_backtest.features import extract_snapshot_features
+from polymarket_backtest.features import MAX_FEATURE_LOOKBACK, extract_snapshot_features
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest_v2.sqlite"
 OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "prepared"
@@ -150,7 +150,7 @@ def build_and_split(
 
         for idx in sampled_indices:
             row = rows[idx]
-            prev_rows = rows[max(0, idx - 24) : idx]
+            prev_rows = rows[max(0, idx - MAX_FEATURE_LOOKBACK) : idx]
             features = extract_snapshot_features(row, prev_rows)
 
             for tag in top_tags:

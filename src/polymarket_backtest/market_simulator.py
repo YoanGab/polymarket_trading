@@ -28,9 +28,11 @@ class PolymarketFeeModel:
     ) -> float:
         if not fees_enabled or quantity <= 0:
             return 0.0
-        # Historical approximation kept for reference:
-        # fee = quantity * price * fee_rate * ((price * (1.0 - price)) ** exponent)
-        fee = quantity * min(price, 1.0 - price) * fee_rate
+        # Polymarket official formula (docs.polymarket.com/trading/fees):
+        #   fee = C * p * feeRate * (p * (1-p))^exponent
+        # Crypto:  feeRate=0.25,   exponent=2 (peak 1.56% at p=0.50)
+        # Sports:  feeRate=0.0175, exponent=1 (peak 0.44% at p=0.50)
+        fee = quantity * price * fee_rate * ((price * (1.0 - price)) ** exponent)
         return round(max(0.0, fee), 4)
 
     @staticmethod
@@ -86,12 +88,12 @@ class MarketSimulator:
         if estimate.quantity < self.minimum_fill_quantity:
             return []
 
-        # Polymarket fee structure (2025-2026):
-        # - Political/event markets: NO trading fees (fees_enabled=False, fee_rate=0)
-        # - Crypto markets: 0.25% fee_rate with quadratic formula
-        # - Sports (NCAAB, Serie A): 0.0175% fee_rate
+        # Polymarket fee structure (2025-2026, docs.polymarket.com/trading/fees):
+        # fee = C * p * feeRate * (p * (1-p))^exponent
+        # - Political/event markets: NO trading fees (fees_enabled=False)
+        # - Crypto markets: feeRate=0.25, exponent=2 (peak ~1.56% at p=0.50)
+        # - Sports (NCAAB, Serie A only): feeRate=0.0175, exponent=1 (peak ~0.44%)
         # - Settlement: NO fees on resolution winnings
-        # The DB values (fees_enabled, fee_rate) are correct per-market.
         taker_fee_equivalent_usdc = PolymarketFeeModel.taker_fee_usdc(
             price=estimate.vwap_price,
             quantity=estimate.quantity,

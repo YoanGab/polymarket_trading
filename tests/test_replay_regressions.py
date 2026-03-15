@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from polymarket_backtest import db
 from polymarket_backtest.metrics import (
     compute_calibration_curve,
     compute_periodic_performance,
@@ -22,7 +23,9 @@ from polymarket_backtest.types import (
     OrderLevel,
     PositionState,
     ReplayConfig,
+    RestingOrder,
     StrategyConfig,
+    dc_replace,
 )
 
 
@@ -81,6 +84,53 @@ def _make_forecast(*, probability_yes: float = 0.75, confidence: float = 0.8) ->
         evidence=[],
         raw_response={},
     )
+
+
+def _make_db_backed_engine() -> tuple[ReplayEngine, StrategyConfig, MarketState]:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    db.init_db(conn)
+
+    market = _make_market_state(best_bid=0.49, best_ask=0.51)
+    db.add_market(
+        conn,
+        market_id=market.market_id,
+        title=market.title,
+        domain=market.domain,
+        market_type=market.market_type,
+        open_ts=market.ts - timedelta(hours=1),
+        close_ts=market.resolution_ts - timedelta(minutes=5) if market.resolution_ts is not None else None,
+        resolution_ts=market.resolution_ts,
+        status=market.status,
+        tags=market.tags,
+        fees_enabled=market.fees_enabled,
+        fee_rate=market.fee_rate,
+        fee_exponent=market.fee_exponent,
+        maker_rebate_rate=market.maker_rebate_rate,
+    )
+    experiment_id = db.create_experiment(
+        conn,
+        name="resting-orders-test",
+        model_id="grok",
+        model_release="test",
+        system_prompt_hash="test-hash",
+        config={"starting_cash": 1_000.0},
+    )
+    strategy = StrategyConfig(
+        name="resting_strategy",
+        family="edge_based",
+        kelly_fraction=0.1,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=60,
+    )
+    engine = ReplayEngine(
+        conn=conn,
+        config=ReplayConfig(experiment_name="resting-orders-test", starting_cash=1_000.0, lookback_minutes=60),
+        grok=SimpleNamespace(experiment_id=experiment_id),
+        strategies=[strategy],
+    )
+    return engine, strategy, market
 
 
 def test_apply_fill_sell_excludes_fees_from_realized_pnl_and_resets_flat_state() -> None:
@@ -191,6 +241,181 @@ def test_normalize_quotes_clamps_zero_quotes_and_preserves_spread() -> None:
     assert normalized.mid == pytest.approx((normalized.best_bid + normalized.best_ask) / 2.0)
 
 
+def test_execute_order_places_passive_order_as_resting_order() -> None:
+    engine, strategy, market = _make_db_backed_engine()
+    portfolio = engine.portfolios[strategy.name]
+    order = OrderIntent(
+        strategy_name=strategy.name,
+        market_id=market.market_id,
+        ts=market.ts,
+        side="buy",
+        liquidity_intent="passive",
+        limit_price=0.50,
+        requested_quantity=10.0,
+        kelly_fraction=strategy.kelly_fraction,
+        edge_bps=50.0,
+        holding_period_minutes=30,
+        thesis="Rest bid",
+    )
+
+    engine._execute_order(
+        portfolio=portfolio,
+        market=market,
+        next_market=market,
+        order=order,
+        entry_probability=0.6,
+    )
+
+    assert portfolio.positions == {}
+    assert len(portfolio.resting_orders) == 1
+    resting_order = portfolio.resting_orders[0]
+    assert resting_order.limit_price == pytest.approx(0.50)
+    assert resting_order.remaining_quantity == pytest.approx(10.0)
+    assert resting_order.gtd_expiry == market.ts + timedelta(minutes=30)
+
+    order_row = engine.conn.execute(
+        "SELECT liquidity_intent, filled_quantity FROM orders WHERE order_id = ?",
+        (resting_order.order_id,),
+    ).fetchone()
+    assert order_row is not None
+    assert order_row["liquidity_intent"] == "passive"
+    assert order_row["filled_quantity"] == pytest.approx(0.0)
+
+
+def test_process_resting_orders_fills_marketable_orders_and_expires_gtd() -> None:
+    engine, strategy, market = _make_db_backed_engine()
+    portfolio = StrategyPortfolio(cash=1_000.0)
+    fill_order = OrderIntent(
+        strategy_name=strategy.name,
+        market_id=market.market_id,
+        ts=market.ts - timedelta(minutes=5),
+        side="buy",
+        liquidity_intent="passive",
+        limit_price=0.52,
+        requested_quantity=10.0,
+        kelly_fraction=strategy.kelly_fraction,
+        edge_bps=60.0,
+        holding_period_minutes=30,
+        thesis="Fill me later",
+    )
+    expire_order = OrderIntent(
+        strategy_name=strategy.name,
+        market_id=market.market_id,
+        ts=market.ts - timedelta(minutes=10),
+        side="buy",
+        liquidity_intent="passive",
+        limit_price=0.40,
+        requested_quantity=5.0,
+        kelly_fraction=strategy.kelly_fraction,
+        edge_bps=10.0,
+        holding_period_minutes=5,
+        thesis="Expire me",
+    )
+    engine._persist_order("fill-order", fill_order)
+    engine._persist_order("expire-order", expire_order)
+    portfolio.resting_orders = [
+        RestingOrder(
+            order_id="fill-order",
+            strategy_name=strategy.name,
+            market_id=market.market_id,
+            placed_ts=fill_order.ts,
+            side="buy",
+            limit_price=fill_order.limit_price,
+            remaining_quantity=fill_order.requested_quantity,
+            gtd_expiry=fill_order.ts + timedelta(minutes=30),
+        ),
+        RestingOrder(
+            order_id="expire-order",
+            strategy_name=strategy.name,
+            market_id=market.market_id,
+            placed_ts=expire_order.ts,
+            side="buy",
+            limit_price=expire_order.limit_price,
+            remaining_quantity=expire_order.requested_quantity,
+            gtd_expiry=market.ts,
+        ),
+    ]
+
+    engine._process_resting_orders(
+        portfolio=portfolio,
+        market=market,
+        forecast=_make_forecast(probability_yes=0.62),
+    )
+
+    assert portfolio.resting_orders == []
+    assert portfolio.cash == pytest.approx(994.8)
+    assert portfolio.positions["test_market"].quantity == pytest.approx(10.0)
+    assert portfolio.positions["test_market"].entry_probability == pytest.approx(0.62)
+    assert portfolio.positions["test_market"].thesis == "Fill me later"
+
+    fill_row = engine.conn.execute("SELECT quantity FROM fills WHERE order_id = 'fill-order'").fetchone()
+    expired_fill_row = engine.conn.execute("SELECT quantity FROM fills WHERE order_id = 'expire-order'").fetchone()
+    filled_qty_row = engine.conn.execute("SELECT filled_quantity FROM orders WHERE order_id = 'fill-order'").fetchone()
+    expired_qty_row = engine.conn.execute(
+        "SELECT filled_quantity FROM orders WHERE order_id = 'expire-order'"
+    ).fetchone()
+    assert fill_row is not None
+    assert fill_row["quantity"] == pytest.approx(10.0)
+    assert expired_fill_row is None
+    assert filled_qty_row is not None and filled_qty_row["filled_quantity"] == pytest.approx(10.0)
+    assert expired_qty_row is not None and expired_qty_row["filled_quantity"] == pytest.approx(0.0)
+
+
+def test_amend_and_cancel_resting_order_update_portfolio_and_order_row() -> None:
+    engine, strategy, market = _make_db_backed_engine()
+    portfolio = StrategyPortfolio(
+        cash=1_000.0,
+        resting_orders=[
+            RestingOrder(
+                order_id="resting-1",
+                strategy_name=strategy.name,
+                market_id=market.market_id,
+                placed_ts=market.ts,
+                side="buy",
+                limit_price=0.49,
+                remaining_quantity=5.0,
+            )
+        ],
+    )
+    engine._persist_order(
+        "resting-1",
+        OrderIntent(
+            strategy_name=strategy.name,
+            market_id=market.market_id,
+            ts=market.ts,
+            side="buy",
+            liquidity_intent="passive",
+            limit_price=0.49,
+            requested_quantity=5.0,
+            kelly_fraction=strategy.kelly_fraction,
+            edge_bps=25.0,
+            holding_period_minutes=60,
+            thesis="Amend me",
+        ),
+    )
+
+    amended = engine._amend_resting_order(
+        portfolio=portfolio,
+        order_id="resting-1",
+        new_price=0.48,
+        new_quantity=8.0,
+    )
+    assert amended is True
+    assert portfolio.resting_orders[0].limit_price == pytest.approx(0.48)
+    assert portfolio.resting_orders[0].remaining_quantity == pytest.approx(8.0)
+
+    order_row = engine.conn.execute(
+        "SELECT limit_price, requested_quantity FROM orders WHERE order_id = 'resting-1'"
+    ).fetchone()
+    assert order_row is not None
+    assert order_row["limit_price"] == pytest.approx(0.48)
+    assert order_row["requested_quantity"] == pytest.approx(8.0)
+
+    cancelled = engine._cancel_resting_order(portfolio=portfolio, order_id="resting-1")
+    assert cancelled is True
+    assert portfolio.resting_orders == []
+
+
 def test_strategy_engine_handles_zero_best_ask_without_division_error() -> None:
     engine = StrategyEngine()
     config = StrategyConfig(
@@ -215,6 +440,18 @@ def test_strategy_engine_handles_zero_best_ask_without_division_error() -> None:
     assert orders
     assert orders[0].requested_quantity > 0.0
     assert orders[0].limit_price >= 0.001
+
+
+def test_strategy_engine_exposes_cancel_and_amend_actions() -> None:
+    engine = StrategyEngine()
+
+    cancel_action = engine.cancel_order("order-123")
+    amend_action = engine.amend_order("order-123", 0.48, 8.0)
+
+    assert cancel_action.order_id == "order-123"
+    assert amend_action.order_id == "order-123"
+    assert amend_action.new_price == pytest.approx(0.48)
+    assert amend_action.new_quantity == pytest.approx(8.0)
 
 
 def test_strategy_engine_respects_category_routing() -> None:
@@ -243,20 +480,26 @@ def test_strategy_engine_respects_category_routing() -> None:
         blocked_categories=["Sports"],
     )
 
-    assert engine.decide(
-        config=allowed_config,
-        market=market,
-        forecast=forecast,
-        position=None,
-        available_cash=1_000.0,
-    ) == []
-    assert engine.decide(
-        config=blocked_config,
-        market=market,
-        forecast=forecast,
-        position=None,
-        available_cash=1_000.0,
-    ) == []
+    assert (
+        engine.decide(
+            config=allowed_config,
+            market=market,
+            forecast=forecast,
+            position=None,
+            available_cash=1_000.0,
+        )
+        == []
+    )
+    assert (
+        engine.decide(
+            config=blocked_config,
+            market=market,
+            forecast=forecast,
+            position=None,
+            available_cash=1_000.0,
+        )
+        == []
+    )
 
 
 def test_arbitrage_strategy_emits_paired_yes_and_no_buys() -> None:
@@ -342,7 +585,8 @@ def test_apply_market_category_metadata_overrides_fees() -> None:
     engine = object.__new__(ReplayEngine)
     engine.market_categories = {
         "crypto_market": ["Crypto"],
-        "sports_market": ["Sports", "NBA"],
+        "ncaab_market": ["Sports", "NCAA Basketball"],
+        "nba_market": ["Sports", "NBA"],
         "political_market": ["Politics"],
     }
 
@@ -350,21 +594,34 @@ def test_apply_market_category_metadata_overrides_fees() -> None:
         engine,
         _make_market_state(best_bid=0.49, best_ask=0.51, market_id="crypto_market"),
     )
-    sports = ReplayEngine._apply_market_category_metadata(
+    ncaab = ReplayEngine._apply_market_category_metadata(
         engine,
-        _make_market_state(best_bid=0.49, best_ask=0.51, market_id="sports_market"),
+        _make_market_state(best_bid=0.49, best_ask=0.51, market_id="ncaab_market"),
+    )
+    nba = ReplayEngine._apply_market_category_metadata(
+        engine,
+        _make_market_state(best_bid=0.49, best_ask=0.51, market_id="nba_market"),
     )
     political = ReplayEngine._apply_market_category_metadata(
         engine,
         _make_market_state(best_bid=0.49, best_ask=0.51, market_id="political_market"),
     )
 
+    # Crypto: feeRate=0.25, exponent=2, maker rebate=20%
     assert crypto.tags == ["Crypto"]
     assert crypto.fees_enabled is True
-    assert crypto.fee_rate == pytest.approx(0.0025)
-    assert sports.tags == ["Sports", "NBA"]
-    assert sports.fees_enabled is True
-    assert sports.fee_rate == pytest.approx(0.000175)
+    assert crypto.fee_rate == pytest.approx(0.25)
+    assert crypto.fee_exponent == pytest.approx(2.0)
+    assert crypto.maker_rebate_rate == pytest.approx(0.20)
+    # NCAAB (fee-bearing sports): feeRate=0.0175, exponent=1, maker rebate=25%
+    assert ncaab.fees_enabled is True
+    assert ncaab.fee_rate == pytest.approx(0.0175)
+    assert ncaab.fee_exponent == pytest.approx(1.0)
+    assert ncaab.maker_rebate_rate == pytest.approx(0.25)
+    # NBA (non-fee-bearing sports): no fees
+    assert nba.fees_enabled is False
+    assert nba.fee_rate == pytest.approx(0.0)
+    # Political: no fees
     assert political.tags == ["Politics"]
     assert political.fees_enabled is False
     assert political.fee_rate == pytest.approx(0.0)
@@ -443,6 +700,86 @@ def test_resolution_convergence_can_open_no_while_holding_yes() -> None:
     assert orders[0].side == "buy"
     assert orders[0].is_no_bet is True
     assert orders[0].limit_price == pytest.approx(0.32)
+
+
+def test_resolution_convergence_can_buy_multi_outcome_leg() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="resolution_multi",
+        family="resolution_convergence",
+        kelly_fraction=0.2,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+        min_confidence=0.7,
+        resolution_hours_max=72.0,
+    )
+    market = dc_replace(
+        _make_market_state(best_bid=0.46, best_ask=0.48, market_id="alice"),
+        title="Alice wins",
+        outcome_count=3,
+        outcome_tokens=["alice", "bob", "carol"],
+    )
+    forecast = _make_forecast(probability_yes=0.60, confidence=0.9)
+
+    orders = engine.decide(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+        related_market_prices={
+            "bob": {"title": "Bob wins", "best_ask": 0.30, "mid": 0.29, "probability_yes": 0.25},
+            "carol": {"title": "Carol wins", "best_ask": 0.25, "mid": 0.24, "probability_yes": 0.15},
+        },
+    )
+
+    assert len(orders) == 1
+    assert orders[0].market_id == "alice"
+    assert orders[0].side == "buy"
+    assert orders[0].is_no_bet is False
+    assert "Multi-outcome resolution convergence" in orders[0].thesis
+
+
+def test_resolution_convergence_buys_all_multi_outcomes_when_asks_sum_below_one() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="resolution_multi_arb",
+        family="resolution_convergence",
+        kelly_fraction=0.2,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+        min_confidence=0.9,
+        resolution_hours_max=72.0,
+    )
+    market = dc_replace(
+        _make_market_state(best_bid=0.28, best_ask=0.30, market_id="alice"),
+        title="Alice wins",
+        outcome_count=3,
+        outcome_tokens=["alice", "bob", "carol"],
+    )
+    forecast = _make_forecast(probability_yes=0.34, confidence=0.2)
+
+    orders = engine.decide(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+        portfolio_cash=1_000.0,
+        starting_cash=1_000.0,
+        total_invested=0.0,
+        related_market_prices={
+            "bob": {"title": "Bob wins", "best_ask": 0.24, "mid": 0.23, "probability_yes": 0.33},
+            "carol": {"title": "Carol wins", "best_ask": 0.20, "mid": 0.19, "probability_yes": 0.33},
+        },
+    )
+
+    assert [order.market_id for order in orders] == ["alice", "bob", "carol"]
+    assert all(order.side == "buy" for order in orders)
+    assert all(order.requested_quantity == pytest.approx(orders[0].requested_quantity) for order in orders)
+    assert all("Multi-outcome arbitrage" in order.thesis for order in orders)
 
 
 def test_edge_based_caps_single_position_to_max_portfolio_pct() -> None:
@@ -983,8 +1320,7 @@ def test_compute_sharpe_like_uses_active_daily_marks_only() -> None:
 
     sharpe_by_strategy = {item["strategy_name"]: item["sharpe_like"] for item in compute_sharpe_like(conn, 1)}
     daily_returns = [
-        (current - previous) / previous
-        for previous, current in zip(active_equities, active_equities[1:], strict=False)
+        (current - previous) / previous for previous, current in zip(active_equities, active_equities[1:], strict=False)
     ]
     expected_sharpe = round((mean(daily_returns) / stdev(daily_returns)) * (365.0**0.5), 6)
 
@@ -1024,11 +1360,71 @@ def test_compute_periodic_performance_groups_by_iso_week_and_month() -> None:
     )
 
     rows = [
-        (1, "active_strategy", "market-a", datetime(2026, 1, 1, 9, 0, tzinfo=UTC).isoformat(), 1000.0, 1.0, 0.5, 10.0, 100.0, 0.0, 0.0),
-        (1, "active_strategy", "market-a", datetime(2026, 1, 3, 12, 0, tzinfo=UTC).isoformat(), 1000.0, 1.0, 0.5, 10.0, 109.0, 0.0, 0.0),
-        (1, "active_strategy", "market-b", datetime(2026, 1, 3, 12, 0, tzinfo=UTC).isoformat(), 1000.0, 0.0, 0.5, 0.0, 110.0, 0.0, 0.0),
-        (1, "active_strategy", "market-a", datetime(2026, 1, 5, 9, 0, tzinfo=UTC).isoformat(), 1000.0, 1.0, 0.5, 10.0, 112.0, 0.0, 0.0),
-        (1, "active_strategy", "market-c", datetime(2026, 1, 8, 18, 0, tzinfo=UTC).isoformat(), 1000.0, 0.0, 0.5, 0.0, 125.0, 0.0, 0.0),
+        (
+            1,
+            "active_strategy",
+            "market-a",
+            datetime(2026, 1, 1, 9, 0, tzinfo=UTC).isoformat(),
+            1000.0,
+            1.0,
+            0.5,
+            10.0,
+            100.0,
+            0.0,
+            0.0,
+        ),
+        (
+            1,
+            "active_strategy",
+            "market-a",
+            datetime(2026, 1, 3, 12, 0, tzinfo=UTC).isoformat(),
+            1000.0,
+            1.0,
+            0.5,
+            10.0,
+            109.0,
+            0.0,
+            0.0,
+        ),
+        (
+            1,
+            "active_strategy",
+            "market-b",
+            datetime(2026, 1, 3, 12, 0, tzinfo=UTC).isoformat(),
+            1000.0,
+            0.0,
+            0.5,
+            0.0,
+            110.0,
+            0.0,
+            0.0,
+        ),
+        (
+            1,
+            "active_strategy",
+            "market-a",
+            datetime(2026, 1, 5, 9, 0, tzinfo=UTC).isoformat(),
+            1000.0,
+            1.0,
+            0.5,
+            10.0,
+            112.0,
+            0.0,
+            0.0,
+        ),
+        (
+            1,
+            "active_strategy",
+            "market-c",
+            datetime(2026, 1, 8, 18, 0, tzinfo=UTC).isoformat(),
+            1000.0,
+            0.0,
+            0.5,
+            0.0,
+            125.0,
+            0.0,
+            0.0,
+        ),
     ]
     conn.executemany(
         """

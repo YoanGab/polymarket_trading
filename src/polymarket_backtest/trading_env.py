@@ -283,6 +283,7 @@ class _ExecutionShim:
     _apply_fill = ReplayEngine._apply_fill
     _persist_and_evict_position = ReplayEngine._persist_and_evict_position
     _redeem_matched_pairs = ReplayEngine._redeem_matched_pairs
+    _apply_redemption_to_position = ReplayEngine._apply_redemption_to_position
     _payout_ratio_for_position = ReplayEngine._payout_ratio_for_position
     _position_mark_price = ReplayEngine._position_mark_price
 
@@ -335,19 +336,11 @@ class _TradingCore:
         ml_output = self._predict_market(market, episode)
         positions = self._position_infos(active_markets={episode.market_id: market})
         yes_position = next(
-            (
-                item
-                for item in positions
-                if item.market_id == episode.market_id and item.direction == "yes"
-            ),
+            (item for item in positions if item.market_id == episode.market_id and item.direction == "yes"),
             None,
         )
         no_position = next(
-            (
-                item
-                for item in positions
-                if item.market_id == episode.market_id and item.direction == "no"
-            ),
+            (item for item in positions if item.market_id == episode.market_id and item.direction == "no"),
             None,
         )
         total_invested = sum(item.quantity * item.entry_price for item in positions)
@@ -470,9 +463,7 @@ class _TradingCore:
 
         total_qty = sum(fill.quantity for fill in fill_records)
         total_fee = sum(fill.fee_usdc - fill.rebate_usdc for fill in fill_records)
-        fill_price = (
-            sum(fill.price * fill.quantity for fill in fill_records) / total_qty if total_qty > 0 else 0.0
-        )
+        fill_price = sum(fill.price * fill.quantity for fill in fill_records) / total_qty if total_qty > 0 else 0.0
         slippage_bps = (
             sum(fill.impact_bps * fill.quantity for fill in fill_records) / total_qty if total_qty > 0 else 0.0
         )
@@ -513,11 +504,13 @@ class _TradingCore:
             raise ValueError(f"Missing market state for {episode.market_id} at {isoformat(episode.current_ts)}")
         tags = normalize_market_tags(market.tags)
         if tags:
-            fees_enabled, fee_rate = category_fee_settings(tags)
+            fee_cfg = category_fee_settings(tags)
             market = dc_replace(
                 market,
-                fees_enabled=fees_enabled,
-                fee_rate=fee_rate,
+                fees_enabled=fee_cfg.fees_enabled,
+                fee_rate=fee_cfg.fee_rate,
+                fee_exponent=fee_cfg.fee_exponent,
+                maker_rebate_rate=fee_cfg.maker_rebate_rate,
                 tags=tags,
             )
         market = self.executor._normalize_quotes(market)
@@ -536,11 +529,13 @@ class _TradingCore:
             return None
         tags = normalize_market_tags(next_market.tags)
         if tags:
-            fees_enabled, fee_rate = category_fee_settings(tags)
+            fee_cfg = category_fee_settings(tags)
             next_market = dc_replace(
                 next_market,
-                fees_enabled=fees_enabled,
-                fee_rate=fee_rate,
+                fees_enabled=fee_cfg.fees_enabled,
+                fee_rate=fee_cfg.fee_rate,
+                fee_exponent=fee_cfg.fee_exponent,
+                maker_rebate_rate=fee_cfg.maker_rebate_rate,
                 tags=tags,
             )
         next_market = self.executor._normalize_quotes(next_market)
@@ -556,8 +551,7 @@ class _TradingCore:
         current_row = self._feature_row(episode.current_row, episode.resolution_ts)
         start = max(0, episode.index - self.feature_lookback)
         prev_rows = [
-            self._feature_row(row, episode.resolution_ts)
-            for row in episode.snapshot_rows[start:episode.index]
+            self._feature_row(row, episode.resolution_ts) for row in episode.snapshot_rows[start : episode.index]
         ]
         return extract_snapshot_features(current_row, prev_rows)
 
@@ -566,7 +560,7 @@ class _TradingCore:
             return None
         start = max(0, episode.index - self.feature_lookback)
         prev_snapshots = []
-        for row in episode.snapshot_rows[start:episode.index]:
+        for row in episode.snapshot_rows[start : episode.index]:
             keys = row.keys()
             payload = {key: row[key] for key in keys}
             payload["resolution_ts"] = isoformat(episode.resolution_ts) if episode.resolution_ts is not None else None
@@ -585,9 +579,7 @@ class _TradingCore:
                     "volume_1m": market.volume_1m,
                     "volume_24h": market.volume_24h,
                     "open_interest": market.open_interest,
-                    "resolution_ts": (
-                        isoformat(market.resolution_ts) if market.resolution_ts is not None else None
-                    ),
+                    "resolution_ts": (isoformat(market.resolution_ts) if market.resolution_ts is not None else None),
                 },
                 "prev_snapshots": prev_snapshots,
             },
@@ -750,9 +742,7 @@ class _TradingCore:
             )
 
         effective_next_market = (
-            next_market
-            if next_market is not None
-            else self.executor._build_degraded_next_market(market, intent)
+            next_market if next_market is not None else self.executor._build_degraded_next_market(market, intent)
         )
         fills = self.simulator.simulate(
             order_id=self._next_order_id(),
@@ -841,10 +831,10 @@ class _TradingCore:
             filled_qty = sum(fill.quantity for fill in applied)
             pending.remaining_quantity = max(0.0, pending.remaining_quantity - filled_qty)
             fills.extend(applied)
-            if (
-                pending.remaining_quantity < self.simulator.minimum_fill_quantity
-                or market.status not in {"active", "open"}
-            ):
+            if pending.remaining_quantity < self.simulator.minimum_fill_quantity or market.status not in {
+                "active",
+                "open",
+            }:
                 del self.pending_orders[order_id]
         return fills
 
@@ -917,9 +907,7 @@ class _TradingCore:
         redemption_value = quantity
         redemption_pnl = redemption_value - total_cost_basis
         yes_realized = (
-            redemption_pnl * (yes_cost_basis / total_cost_basis)
-            if total_cost_basis > 0
-            else redemption_pnl / 2.0
+            redemption_pnl * (yes_cost_basis / total_cost_basis) if total_cost_basis > 0 else redemption_pnl / 2.0
         )
         no_realized = redemption_pnl - yes_realized
 

@@ -76,6 +76,8 @@ class ReplayEngine:
         self._history_by_market: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         self._history_index_by_key: dict[tuple[str, str], int] = {}
         self._next_ts_cache: dict[tuple[str, str], tuple[str, str] | None] = {}
+        self._forecast_cache: dict[tuple[str, str], tuple[Any, str, str]] = {}
+        self._persisted_forecasts: set[tuple[str, str]] = set()
         self.experiment_id = self.grok.experiment_id
         if self.experiment_id is None:
             raise ValueError("ReplayEngine requires grok.experiment_id")
@@ -215,17 +217,22 @@ class ReplayEngine:
             self._get_resolution(market_id)
 
     def _preload_market_data(self, timelines: dict[str, list[datetime]]) -> None:
-        """Batch-load market snapshots for timeline timestamps into memory."""
+        """Batch-load replay states plus full hourly history for feature extraction."""
         self._market_cache = {}
         self._history_by_market = {}
         self._history_index_by_key = {}
         self._next_ts_cache = {}
+        self._forecast_cache = {}
+        self._persisted_forecasts = set()
         all_market_ids = list(timelines.keys())
         if not all_market_ids:
             return
 
-        # Build next-timestamp cache from timelines (cheap, in-memory)
+        timeline_ts_by_market: dict[str, set[str]] = {}
+
+        # Stride controls decision times, not which hourly history rows are available.
         for market_id, timestamps in timelines.items():
+            timeline_ts_by_market[market_id] = {isoformat(ts) for ts in timestamps}
             for i, ts in enumerate(timestamps):
                 ts_key = isoformat(ts)
                 if i + 1 < len(timestamps):
@@ -246,14 +253,17 @@ class ReplayEngine:
             )
             meta_filter = "JOIN _selected_markets sm ON sm.market_id = markets.market_id"
             rule_filter = "JOIN _selected_markets sm ON sm.market_id = market_rule_revisions.market_id"
+            snapshot_filter = "JOIN _selected_markets sm ON sm.market_id = s.market_id"
             meta_params: tuple[str, ...] = ()
         else:
             placeholders = ", ".join("?" for _ in all_market_ids)
             meta_filter = f"WHERE market_id IN ({placeholders})"
             rule_filter = f"WHERE market_id IN ({placeholders})"
+            snapshot_filter = f"WHERE s.market_id IN ({placeholders})"
             meta_params = tuple(all_market_ids)
 
         market_meta: dict[str, Any] = {}
+        outcome_tokens_by_market = db.get_event_outcome_tokens_map(self.conn, all_market_ids)
         meta_rows = self.conn.execute(
             f"""
             SELECT market_id, title, domain, market_type, tags_json, resolution_ts,
@@ -282,106 +292,90 @@ class ReplayEngine:
             if mid not in rules_by_market:
                 rules_by_market[mid] = (str(rr["rules_text"]), str(rr["additional_context"]))
 
-        # Build (market_id, ts) pairs to load — only timestamps in timelines
-        ts_pairs: list[tuple[str, str]] = []
-        for market_id, timestamps in timelines.items():
-            for ts in timestamps:
-                ts_pairs.append((market_id, isoformat(ts)))
-
-        # Load snapshots in chunks using exact (market_id, ts) matching
-        chunk_size = 500
         history_by_market: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-        for chunk_start in range(0, len(ts_pairs), chunk_size):
-            chunk = ts_pairs[chunk_start : chunk_start + chunk_size]
-            # Use a VALUES-based approach for exact lookups
-            conditions = " OR ".join("(s.market_id = ? AND s.ts = ?)" for _ in chunk)
-            params: list[str] = []
-            for mid, ts_str in chunk:
-                params.extend([mid, ts_str])
-            rows = self.conn.execute(
-                f"""
-                SELECT s.market_id, s.ts, s.status, s.best_bid, s.best_ask,
-                       s.mid, s.last_trade, s.volume_1m, s.volume_24h,
-                       s.open_interest, s.tick_size
-                FROM market_snapshots s
-                WHERE {conditions}
-                """,
-                tuple(params),
-            ).fetchall()
+        rows = self.conn.execute(
+            f"""
+            SELECT s.market_id, s.ts, s.status, s.best_bid, s.best_ask,
+                   s.mid, s.last_trade, s.volume_1m, s.volume_24h,
+                   s.open_interest, s.tick_size
+            FROM market_snapshots s
+            {snapshot_filter}
+            ORDER BY s.market_id, s.ts
+            """,
+            meta_params,
+        ).fetchall()
 
-            for row in rows:
-                market_id = str(row["market_id"])
-                ts = datetime.fromisoformat(str(row["ts"]))
-                ts_str = isoformat(ts)
-                meta = market_meta.get(market_id)
-                rules = rules_by_market.get(market_id, ("", ""))
+        for row in rows:
+            market_id = str(row["market_id"])
+            meta = market_meta.get(market_id)
+            if meta is None:
+                continue
 
-                if meta is None:
-                    continue
+            ts = datetime.fromisoformat(str(row["ts"]))
+            ts_str = isoformat(ts)
+            resolution_ts = (
+                isoformat(datetime.fromisoformat(str(meta["resolution_ts"]))) if meta["resolution_ts"] else None
+            )
+            snapshot = {
+                "market_id": market_id,
+                "ts": ts_str,
+                "status": str(row["status"]),
+                "best_bid": float(row["best_bid"]),
+                "best_ask": float(row["best_ask"]),
+                "mid": float(row["mid"]),
+                "last_trade": float(row["last_trade"]),
+                "volume_1m": float(row["volume_1m"]),
+                "volume_24h": float(row["volume_24h"]),
+                "open_interest": float(row["open_interest"]),
+                "tick_size": float(row["tick_size"]),
+                "resolution_ts": resolution_ts,
+            }
 
-                state = MarketState(
-                    market_id=market_id,
-                    title=str(meta["title"]),
-                    domain=str(meta["domain"]),
-                    market_type=str(meta["market_type"]),
-                    ts=ts,
-                    status=str(row["status"]),
-                    best_bid=float(row["best_bid"]),
-                    best_ask=float(row["best_ask"]),
-                    mid=float(row["mid"]),
-                    last_trade=float(row["last_trade"]),
-                    volume_1m=float(row["volume_1m"]),
-                    volume_24h=float(row["volume_24h"]),
-                    open_interest=float(row["open_interest"]),
-                    tick_size=float(row["tick_size"]),
-                    rules_text=rules[0],
-                    additional_context=rules[1],
-                    resolution_ts=(
-                        datetime.fromisoformat(str(meta["resolution_ts"])) if meta["resolution_ts"] else None
-                    ),
-                    fees_enabled=bool(meta["fees_enabled"]),
-                    fee_rate=float(meta["fee_rate"]),
-                    fee_exponent=float(meta["fee_exponent"]),
-                    maker_rebate_rate=float(meta["maker_rebate_rate"]),
-                    orderbook=[],
-                    tags=self._decode_tags_json(meta["tags_json"]),
-                )
-                state = self._apply_market_category_metadata(state)
-                self._market_cache[(market_id, ts_str)] = state
-                history_by_market.setdefault(market_id, []).append(
-                    (
-                        ts_str,
-                        {
-                            "market_id": market_id,
-                            "ts": ts_str,
-                            "status": str(row["status"]),
-                            "best_bid": float(row["best_bid"]),
-                            "best_ask": float(row["best_ask"]),
-                            "mid": float(row["mid"]),
-                            "last_trade": float(row["last_trade"]),
-                            "volume_1m": float(row["volume_1m"]),
-                            "volume_24h": float(row["volume_24h"]),
-                            "open_interest": float(row["open_interest"]),
-                            "tick_size": float(row["tick_size"]),
-                            "resolution_ts": (
-                                isoformat(datetime.fromisoformat(str(meta["resolution_ts"])))
-                                if meta["resolution_ts"]
-                                else None
-                            ),
-                        },
-                    )
-                )
+            market_history = history_by_market.setdefault(market_id, [])
+            self._history_index_by_key[(market_id, ts_str)] = len(market_history)
+            market_history.append((ts_str, snapshot))
 
-        for market_id, history in history_by_market.items():
-            history.sort(key=lambda item: item[0])
-            self._history_by_market[market_id] = history
-            for index, (ts_str, _) in enumerate(history):
-                self._history_index_by_key[(market_id, ts_str)] = index
+            if ts_str not in timeline_ts_by_market.get(market_id, set()):
+                continue
+
+            rules = rules_by_market.get(market_id, ("", ""))
+            event_outcome_tokens = outcome_tokens_by_market.get(market_id, [])
+            outcome_tokens = event_outcome_tokens if len(event_outcome_tokens) > 1 else []
+            state = MarketState(
+                market_id=market_id,
+                title=str(meta["title"]),
+                domain=str(meta["domain"]),
+                market_type=str(meta["market_type"]),
+                ts=ts,
+                status=str(row["status"]),
+                best_bid=float(row["best_bid"]),
+                best_ask=float(row["best_ask"]),
+                mid=float(row["mid"]),
+                last_trade=float(row["last_trade"]),
+                volume_1m=float(row["volume_1m"]),
+                volume_24h=float(row["volume_24h"]),
+                open_interest=float(row["open_interest"]),
+                tick_size=float(row["tick_size"]),
+                rules_text=rules[0],
+                additional_context=rules[1],
+                resolution_ts=datetime.fromisoformat(str(meta["resolution_ts"])) if meta["resolution_ts"] else None,
+                fees_enabled=bool(meta["fees_enabled"]),
+                fee_rate=float(meta["fee_rate"]),
+                fee_exponent=float(meta["fee_exponent"]),
+                maker_rebate_rate=float(meta["maker_rebate_rate"]),
+                orderbook=[],
+                tags=self._decode_tags_json(meta["tags_json"]),
+                outcome_count=len(outcome_tokens) if outcome_tokens else 2,
+                outcome_tokens=list(outcome_tokens),
+            )
+            self._market_cache[(market_id, ts_str)] = self._apply_market_category_metadata(state)
+
+        self._history_by_market = history_by_market
 
         logger.info(
-            "Preloaded %d market states and %d market histories for %d markets",
+            "Preloaded %d market states and %d hourly history rows for %d markets",
             len(self._market_cache),
-            len(self._history_by_market),
+            sum(len(history) for history in self._history_by_market.values()),
             len(all_market_ids),
         )
 
@@ -393,12 +387,14 @@ class ReplayEngine:
     def _apply_market_category_metadata(self, market: MarketState) -> MarketState:
         market_categories = getattr(self, "market_categories", {})
         tags = normalize_market_tags([*market.tags, *market_categories.get(market.market_id, [])])
-        fees_enabled, fee_rate = category_fee_settings(tags)
+        fee_cfg = category_fee_settings(tags)
         return dc_replace(
             market,
             tags=tags,
-            fees_enabled=fees_enabled,
-            fee_rate=fee_rate,
+            fees_enabled=fee_cfg.fees_enabled,
+            fee_rate=fee_cfg.fee_rate,
+            fee_exponent=fee_cfg.fee_exponent,
+            maker_rebate_rate=fee_cfg.maker_rebate_rate,
         )
 
     @staticmethod
@@ -447,7 +443,7 @@ class ReplayEngine:
         market_id: str,
         timestamp: datetime,
         *,
-        lookback: int = 24,
+        lookback: int = MAX_FEATURE_LOOKBACK,
     ) -> list[dict[str, Any]]:
         history = self._history_by_market.get(market_id, [])
         if not history or lookback <= 0:
@@ -463,28 +459,99 @@ class ReplayEngine:
 
     def _build_related_market_prices(
         self,
-        market_id: str,
-        timestamp: datetime,
+        market: MarketState,
     ) -> dict[str, dict[str, Any]]:
         related_market_prices: dict[str, dict[str, Any]] = {}
         tracker = getattr(self, "cross_market", None)
         if tracker is None:
             return related_market_prices
-        for related in tracker.get_related_markets(market_id):
-            related_market = self._get_cached_market(related.market_id, timestamp)
+
+        related_by_market_id = {related.market_id: related for related in tracker.get_related_markets(market.market_id)}
+        candidate_market_ids = list(dict.fromkeys([*market.outcome_tokens, *related_by_market_id.keys()]))
+        for related_market_id in candidate_market_ids:
+            if related_market_id == market.market_id:
+                continue
+            related_market = self._get_cached_market(related_market_id, market.ts)
             if related_market is None:
                 continue
-            related_metadata = tracker.get_market_metadata(related.market_id)
-            related_market_prices[related.market_id] = {
+            related_market = self._normalize_quotes(related_market)
+            related_market = self._ensure_orderbook(related_market, reason="related_snapshot")
+            related_metadata = tracker.get_market_metadata(related_market_id)
+            raw_probability = related_market.mid
+            try:
+                related_forecast, _, _ = self._get_or_create_forecast(
+                    related_market_id,
+                    market.ts,
+                    market_state=related_market,
+                    prev_snapshots=self._get_market_history(
+                        related_market_id,
+                        market.ts,
+                        lookback=MAX_FEATURE_LOOKBACK,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Related forecast failed for market_id=%s at ts=%s",
+                    related_market_id,
+                    isoformat(market.ts),
+                )
+            else:
+                raw_probability = float(related_forecast.probability_yes)
+
+            correlation = 0.0
+            if related_market_id in related_by_market_id:
+                correlation = related_by_market_id[related_market_id].correlation
+
+            related_market_prices[related_market_id] = {
                 "mid": related_market.mid,
                 "best_bid": related_market.best_bid,
                 "best_ask": related_market.best_ask,
-                "correlation": related.correlation,
+                "correlation": correlation,
                 "title": related_market.title,
                 "event_id": related_metadata.event_id if related_metadata is not None else None,
                 "tags": list(related_market.tags),
+                "probability_yes": raw_probability,
+                "outcome_count": related_market.outcome_count,
+                "outcome_tokens": list(related_market.outcome_tokens),
+                "volume_24h": related_market.volume_24h,
             }
         return related_market_prices
+
+    def _get_or_create_forecast(
+        self,
+        market_id: str,
+        timestamp: datetime,
+        *,
+        market_state: MarketState | None = None,
+        prev_snapshots: list[dict[str, Any]] | None = None,
+    ) -> tuple[Any, str, str]:
+        if not hasattr(self, "_forecast_cache"):
+            self._forecast_cache = {}
+        if not hasattr(self, "_persisted_forecasts"):
+            self._persisted_forecasts = set()
+        ts_key = isoformat(timestamp)
+        cache_key = (market_id, ts_key)
+        cached = self._forecast_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if market_state is None:
+            market_state = self._get_cached_market(market_id, timestamp)
+        if market_state is None:
+            raise ValueError(f"Missing market state for market_id={market_id} at ts={ts_key}")
+
+        forecast_result = self.grok.forecast(
+            market_id,
+            timestamp,
+            market_state=market_state,
+            prev_snapshots=list(prev_snapshots or []),
+        )
+        self._forecast_cache[cache_key] = forecast_result
+        if cache_key not in self._persisted_forecasts:
+            forecast, prompt_hash, context_hash = forecast_result
+            self._persist_model_output(forecast, prompt_hash, context_hash)
+            self._persisted_forecasts.add(cache_key)
+        return forecast_result
 
     def _process_market_snapshot(self, market_id: str, timestamp: datetime) -> None:
         if self._is_market_resolved_as_of(market_id, timestamp):
@@ -506,11 +573,10 @@ class ReplayEngine:
 
         market = self._normalize_quotes(market)
         market = self._ensure_orderbook(market, reason="current_snapshot")
-        history = self._get_market_history(market_id, timestamp, lookback=24)
-        related_market_prices = self._build_related_market_prices(market_id, timestamp)
+        history = self._get_market_history(market_id, timestamp, lookback=MAX_FEATURE_LOOKBACK)
 
         try:
-            forecast, prompt_hash, context_hash = self.grok.forecast(
+            forecast, _, _ = self._get_or_create_forecast(
                 market_id,
                 timestamp,
                 market_state=market,
@@ -524,7 +590,26 @@ class ReplayEngine:
             )
             return
 
-        self._persist_model_output(forecast, prompt_hash, context_hash)
+        related_market_prices = self._build_related_market_prices(market)
+        model_probability_by_market = {
+            market.market_id: float(forecast.probability_yes),
+            **{
+                related_market_id: float(related_data.get("probability_yes", related_data.get("mid", 0.5)))
+                for related_market_id, related_data in related_market_prices.items()
+            },
+        }
+        if market.outcome_count > 2 and len(market.outcome_tokens) > 2:
+            total_probability = sum(
+                model_probability_by_market.get(outcome_market_id, 0.0) for outcome_market_id in market.outcome_tokens
+            )
+            if total_probability > 0:
+                for outcome_market_id in list(model_probability_by_market):
+                    if outcome_market_id not in market.outcome_tokens:
+                        continue
+                    normalized_probability = model_probability_by_market[outcome_market_id] / total_probability
+                    model_probability_by_market[outcome_market_id] = normalized_probability
+                    if outcome_market_id in related_market_prices:
+                        related_market_prices[outcome_market_id]["normalized_probability"] = normalized_probability
 
         next_market = self._get_cached_next_market(market_id, timestamp)
         if next_market is not None:
@@ -583,28 +668,51 @@ class ReplayEngine:
                 starting_cash=self.config.starting_cash,
                 total_invested=self._total_invested_capital(portfolio),
                 on_missed_trade=(
-                    lambda edge_bps, reason, *, _portfolio=portfolio, _market=market, _strategy=strategy:
-                    self._record_missed_trade(
-                        portfolio=_portfolio,
-                        strategy_name=_strategy.name,
-                        market_id=_market.market_id,
-                        ts=_market.ts,
-                        edge_bps=edge_bps,
-                        reason=reason,
+                    lambda edge_bps, reason, *, _portfolio=portfolio, _market=market, _strategy=strategy: (
+                        self._record_missed_trade(
+                            portfolio=_portfolio,
+                            strategy_name=_strategy.name,
+                            market_id=_market.market_id,
+                            ts=_market.ts,
+                            edge_bps=edge_bps,
+                            reason=reason,
+                        )
                     )
                 ),
                 related_market_prices=related_market_prices,
             )
             for action in orders:
                 if isinstance(action, OrderIntent):
+                    execution_market = market
+                    execution_next_market = next_market
+                    if action.market_id != market.market_id:
+                        execution_market = self._get_cached_market(action.market_id, timestamp)
+                        if execution_market is None:
+                            logger.warning(
+                                "Skipping related-market order for market_id=%s at ts=%s because snapshot is missing",
+                                action.market_id,
+                                isoformat(timestamp),
+                            )
+                            continue
+                        execution_market = self._normalize_quotes(execution_market)
+                        execution_market = self._ensure_orderbook(
+                            execution_market,
+                            reason="related_execution_market",
+                        )
+                        execution_next_market = self._get_cached_next_market(action.market_id, timestamp)
+                        if execution_next_market is not None:
+                            execution_next_market = self._normalize_quotes(execution_next_market)
+                            execution_next_market = self._ensure_orderbook(
+                                execution_next_market,
+                                reason="related_execution_next_market",
+                            )
+                    entry_probability = float(model_probability_by_market.get(action.market_id, execution_market.mid))
                     self._execute_order(
                         portfolio,
-                        market,
-                        next_market,
+                        execution_market,
+                        execution_next_market,
                         action,
-                        entry_probability=(
-                            1.0 - forecast.probability_yes if action.is_no_bet else forecast.probability_yes
-                        ),
+                        entry_probability=(1.0 - entry_probability if action.is_no_bet else entry_probability),
                     )
                 elif isinstance(action, CancelOrderAction):
                     self._cancel_resting_order(
@@ -776,6 +884,152 @@ class ReplayEngine:
             volume_1m=max(effective_1m * 0.25, order.requested_quantity * 3.0, 1.0),
         )
 
+    def _persist_order(self, order_id: str, order: OrderIntent) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO orders (
+                order_id, experiment_id, strategy_name, market_id, ts, side,
+                liquidity_intent, limit_price, requested_quantity, edge_bps,
+                kelly_fraction, holding_period_minutes, thesis
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_id,
+                self.experiment_id,
+                order.strategy_name,
+                order.market_id,
+                isoformat(order.ts),
+                order.side,
+                order.liquidity_intent,
+                order.limit_price,
+                order.requested_quantity,
+                order.edge_bps,
+                order.kelly_fraction,
+                order.holding_period_minutes,
+                order.thesis,
+            ),
+        )
+
+    def _resting_order_expiry(self, order: OrderIntent) -> datetime | None:
+        if order.holding_period_minutes is None:
+            return None
+        return order.ts + timedelta(minutes=order.holding_period_minutes)
+
+    def _market_for_resting_order(self, market: MarketState, resting_order: RestingOrder) -> MarketState:
+        if not resting_order.is_no_bet:
+            return market
+        return self.simulator._complement_market(market)
+
+    def _resting_order_should_fill(self, market: MarketState, resting_order: RestingOrder) -> bool:
+        tolerance = market.tick_size / 2.0 + 1e-12
+        if resting_order.side == "buy":
+            return market.best_ask <= resting_order.limit_price + tolerance
+        return market.best_bid >= resting_order.limit_price - tolerance
+
+    def _load_order_thesis(self, order_id: str) -> str:
+        row = self.conn.execute("SELECT thesis FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+        if row is None:
+            return ""
+        return str(row["thesis"])
+
+    def _build_resting_fill(self, market: MarketState, resting_order: RestingOrder) -> FillResult:
+        taker_fee_equivalent_usdc = PolymarketFeeModel.taker_fee_usdc(
+            price=resting_order.limit_price,
+            quantity=resting_order.remaining_quantity,
+            fees_enabled=market.fees_enabled,
+            fee_rate=market.fee_rate,
+            exponent=market.fee_exponent,
+        )
+        rebate_usdc = PolymarketFeeModel.maker_rebate_usdc(
+            taker_fee_usdc=taker_fee_equivalent_usdc,
+            maker_rebate_rate=market.maker_rebate_rate,
+            eligible=self.simulator.maker_rebate_eligible,
+        )
+        fill_delay_seconds = max(
+            0.0,
+            (ensure_utc(market.ts) - ensure_utc(resting_order.placed_ts)).total_seconds(),
+        )
+        return FillResult(
+            order_id=resting_order.order_id,
+            market_id=resting_order.market_id,
+            strategy_name=resting_order.strategy_name,
+            fill_ts=market.ts,
+            side=resting_order.side,
+            liquidity_role="maker",
+            price=round(resting_order.limit_price, 4),
+            quantity=round(resting_order.remaining_quantity, 4),
+            fee_usdc=0.0,
+            rebate_usdc=rebate_usdc,
+            impact_bps=0.0,
+            fill_delay_seconds=round(fill_delay_seconds, 2),
+        )
+
+    def _process_resting_orders(
+        self,
+        *,
+        portfolio: StrategyPortfolio,
+        market: MarketState,
+        forecast: Any,
+    ) -> None:
+        if not portfolio.resting_orders:
+            return
+
+        remaining_orders: list[RestingOrder] = []
+        for resting_order in portfolio.resting_orders:
+            if resting_order.market_id != market.market_id:
+                remaining_orders.append(resting_order)
+                continue
+            if resting_order.gtd_expiry is not None and ensure_utc(market.ts) >= ensure_utc(resting_order.gtd_expiry):
+                continue
+
+            effective_market = self._market_for_resting_order(market, resting_order)
+            if not self._resting_order_should_fill(effective_market, resting_order):
+                remaining_orders.append(resting_order)
+                continue
+
+            fill = self._build_resting_fill(effective_market, resting_order)
+            self._persist_fill(fill)
+            self.conn.execute(
+                "UPDATE orders SET filled_quantity = filled_quantity + ? WHERE order_id = ?",
+                (fill.quantity, resting_order.order_id),
+            )
+            self._apply_fill(
+                portfolio,
+                fill,
+                self._load_order_thesis(resting_order.order_id),
+                1.0 - forecast.probability_yes if resting_order.is_no_bet else forecast.probability_yes,
+                is_no_bet=resting_order.is_no_bet,
+            )
+
+        portfolio.resting_orders = remaining_orders
+
+    def _cancel_resting_order(self, *, portfolio: StrategyPortfolio, order_id: str) -> bool:
+        original_count = len(portfolio.resting_orders)
+        portfolio.resting_orders = [
+            resting_order for resting_order in portfolio.resting_orders if resting_order.order_id != order_id
+        ]
+        return len(portfolio.resting_orders) != original_count
+
+    def _amend_resting_order(
+        self,
+        *,
+        portfolio: StrategyPortfolio,
+        order_id: str,
+        new_price: float,
+        new_quantity: float,
+    ) -> bool:
+        for resting_order in portfolio.resting_orders:
+            if resting_order.order_id != order_id:
+                continue
+            resting_order.limit_price = new_price
+            resting_order.remaining_quantity = new_quantity
+            self.conn.execute(
+                "UPDATE orders SET limit_price = ?, requested_quantity = ? WHERE order_id = ?",
+                (new_price, new_quantity, order_id),
+            )
+            return True
+        return False
+
     def _normalized_resolved_outcome(
         self,
         resolution: sqlite3.Row,
@@ -861,18 +1115,10 @@ class ReplayEngine:
         portfolio: StrategyPortfolio,
         market: Any,
         next_market: Any,
-        order: Any,
+        order: OrderIntent,
         entry_probability: float,
     ) -> None:
         market = self._ensure_orderbook(self._normalize_quotes(market), reason="execution_market")
-        effective_next_market = (
-            self._ensure_orderbook(
-                self._normalize_quotes(next_market),
-                reason="execution_next_market",
-            )
-            if next_market is not None
-            else self._build_degraded_next_market(market, order)
-        )
         if order.side == "sell":
             position_key = _position_key(order.market_id, order.is_no_bet)
             available_inventory = portfolio.positions.get(position_key)
@@ -888,13 +1134,23 @@ class ReplayEngine:
             if order.requested_quantity > available_quantity:
                 order = dc_replace(order, requested_quantity=available_quantity)
         effective_market = self.simulator._market_for_intent(market, order)
-        effective_execution_next_market = self.simulator._market_for_intent(effective_next_market, order)
-        fill_estimate = (
-            self.simulator._simulate_aggressive(effective_market, order)
-            if order.liquidity_intent == "aggressive"
-            else self.simulator._simulate_passive(effective_market, effective_execution_next_market, order)
-        )
-        estimated_notional = fill_estimate.vwap_price * fill_estimate.quantity
+        if order.liquidity_intent == "passive" and order.order_type == "post_only":
+            if self.simulator._would_cross_spread(effective_market, order):
+                return
+
+        if order.liquidity_intent == "passive":
+            estimated_notional = order.limit_price * order.requested_quantity
+        else:
+            effective_next_market = (
+                self._ensure_orderbook(
+                    self._normalize_quotes(next_market),
+                    reason="execution_next_market",
+                )
+                if next_market is not None
+                else self._build_degraded_next_market(market, order)
+            )
+            fill_estimate = self.simulator._simulate_aggressive(effective_market, order)
+            estimated_notional = fill_estimate.vwap_price * fill_estimate.quantity
         strategy = self._strategy_config(order.strategy_name)
         if order.side == "buy" and strategy is not None:
             reserve_cash = self.config.starting_cash * (1.0 - strategy.max_total_invested_pct)
@@ -940,30 +1196,23 @@ class ReplayEngine:
             return
 
         order_id = new_order_id()
-        self.conn.execute(
-            """
-            INSERT INTO orders (
-                order_id, experiment_id, strategy_name, market_id, ts, side,
-                liquidity_intent, limit_price, requested_quantity, edge_bps,
-                kelly_fraction, holding_period_minutes, thesis
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                order_id,
-                self.experiment_id,
-                order.strategy_name,
-                order.market_id,
-                isoformat(order.ts),
-                order.side,
-                order.liquidity_intent,
-                order.limit_price,
-                order.requested_quantity,
-                order.edge_bps,
-                order.kelly_fraction,
-                order.holding_period_minutes,
-                order.thesis,
-            ),
-        )
+        self._persist_order(order_id, order)
+        if order.liquidity_intent == "passive":
+            portfolio.resting_orders.append(
+                RestingOrder(
+                    order_id=order_id,
+                    strategy_name=order.strategy_name,
+                    market_id=order.market_id,
+                    placed_ts=order.ts,
+                    side=order.side,
+                    limit_price=order.limit_price,
+                    remaining_quantity=order.requested_quantity,
+                    is_no_bet=order.is_no_bet,
+                    gtd_expiry=self._resting_order_expiry(order),
+                )
+            )
+            return
+
         fills = self.simulator.simulate(
             order_id=order_id,
             market=market,
@@ -1258,6 +1507,17 @@ class ReplayEngine:
     def _settle_resolved_positions(self, replay_ts: datetime) -> None:
         for strategy in self.strategies:
             portfolio = self.portfolios[strategy.name]
+            portfolio.resting_orders = [
+                resting_order
+                for resting_order in portfolio.resting_orders
+                if not (
+                    (
+                        resting_order.gtd_expiry is not None
+                        and ensure_utc(replay_ts) >= ensure_utc(resting_order.gtd_expiry)
+                    )
+                    or self._is_market_resolved_as_of(resting_order.market_id, replay_ts)
+                )
+            ]
             for position_key, position in list(portfolio.positions.items()):
                 if position.quantity <= 0:
                     continue

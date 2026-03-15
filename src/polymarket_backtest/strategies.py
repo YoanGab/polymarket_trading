@@ -209,6 +209,7 @@ class StrategyEngine:
                     starting_cash=starting_cash,
                     total_invested=total_invested,
                     on_missed_trade=on_missed_trade,
+                    related_market_prices=related_market_prices,
                 )
             )
         return orders
@@ -914,6 +915,7 @@ class StrategyEngine:
         starting_cash: float | None = None,
         total_invested: float | None = None,
         on_missed_trade: Callable[[float, str], None] | None = None,
+        related_market_prices: dict[str, dict[str, Any]] | None = None,
     ) -> list[OrderIntent]:
         """Exploit uncertainty in mid-range markets near resolution.
 
@@ -931,27 +933,109 @@ class StrategyEngine:
 
         has_yes_position = yes_position is not None and yes_position.quantity > 0
         has_no_position = no_position is not None and no_position.quantity > 0
+        is_multi_outcome = market.outcome_count > 2 and len(market.outcome_tokens) > 2
+        ask_price = normalized_ask_price(market.best_ask)
+
+        if is_multi_outcome:
+            outcome_quotes: list[dict[str, Any]] = [
+                {
+                    "market_id": market.market_id,
+                    "title": market.title,
+                    "ask_price": ask_price,
+                    "probability": float(forecast.probability_yes),
+                }
+            ]
+            related_market_prices = related_market_prices or {}
+            for outcome_market_id in market.outcome_tokens:
+                if outcome_market_id == market.market_id:
+                    continue
+                sibling = related_market_prices.get(outcome_market_id)
+                if sibling is None:
+                    continue
+                outcome_quotes.append(
+                    {
+                        "market_id": outcome_market_id,
+                        "title": str(sibling.get("title", outcome_market_id)),
+                        "ask_price": normalized_contract_price(float(sibling.get("best_ask", sibling.get("mid", 0.5)))),
+                        "probability": float(sibling.get("probability_yes", sibling.get("mid", 0.5))),
+                    }
+                )
+
+            total_ask = sum(float(item["ask_price"]) for item in outcome_quotes)
+            arbitrage_edge_bps = max(0.0, (1.0 - total_ask) * 10_000.0)
+            canonical_market_id = sorted(item["market_id"] for item in outcome_quotes)[0]
+            if (
+                market.market_id == canonical_market_id
+                and total_ask < 1.0
+                and arbitrage_edge_bps >= config.edge_threshold_bps
+            ):
+                basket_cash_cap = self._entry_cash_cap(
+                    config=config,
+                    available_cash=available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    edge_bps=arbitrage_edge_bps,
+                    on_missed_trade=on_missed_trade,
+                )
+                if basket_cash_cap > 0 and total_ask > 0:
+                    quantity = _apply_volume_cap(
+                        min(config.max_position_notional, basket_cash_cap) / total_ask,
+                        config,
+                        market,
+                    )
+                    if quantity >= MIN_ORDER_QUANTITY:
+                        thesis = (
+                            f"Multi-outcome arbitrage: {len(outcome_quotes)} asks sum to {total_ask:.3f} "
+                            f"with {hours_to_res:.0f}h to resolution"
+                        )
+                        return [
+                            OrderIntent(
+                                strategy_name=config.name,
+                                market_id=str(item["market_id"]),
+                                ts=market.ts,
+                                side="buy",
+                                liquidity_intent="aggressive",
+                                limit_price=float(item["ask_price"]),
+                                requested_quantity=quantity,
+                                kelly_fraction=config.kelly_fraction,
+                                edge_bps=arbitrage_edge_bps,
+                                holding_period_minutes=int(hours_to_res * 60),
+                                thesis=thesis,
+                            )
+                            for item in outcome_quotes
+                        ]
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
         mid_low = config.extreme_low
         mid_high = config.extreme_high
-        if not (mid_low <= market.mid <= mid_high):
+        if not is_multi_outcome and not (mid_low <= market.mid <= mid_high):
             return []
 
         if forecast.confidence < config.min_confidence:
             return []
 
-        # Scale down for edge-of-range markets (further from 0.50 = less confident)
-        half_range = max(0.01, (mid_high - mid_low) / 2.0)
-        mid_distance = abs(market.mid - 0.50) / half_range
-        if mid_distance < 0.5:
+        # Scale down for edge-of-range markets (further from 0.50 = less confident).
+        # Multi-outcome markets often trade well below 0.50, so keep their sizing neutral.
+        if is_multi_outcome:
             mid_factor = 1.0
         else:
-            mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
+            half_range = max(0.01, (mid_high - mid_low) / 2.0)
+            mid_distance = abs(market.mid - 0.50) / half_range
+            if mid_distance < 0.5:
+                mid_factor = 1.0
+            else:
+                mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
         confidence_factor = min(3.0, max(0.5, (forecast.confidence - 0.55) * 10.0))
 
-        ask_price = normalized_ask_price(market.best_ask)
-        edge_bps = (forecast.probability_yes - ask_price) * 10_000.0
+        target_probability = float(forecast.probability_yes)
+        if is_multi_outcome:
+            total_probability = target_probability
+            for sibling in (related_market_prices or {}).values():
+                total_probability += float(sibling.get("probability_yes", sibling.get("mid", 0.5)))
+            if total_probability > 0:
+                target_probability /= total_probability
+        edge_bps = (target_probability - ask_price) * 10_000.0
         fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
         net_edge_bps = edge_bps - fee_bps
         if net_edge_bps >= config.edge_threshold_bps:
@@ -978,10 +1062,10 @@ class StrategyEngine:
                         net_edge_bps=net_edge_bps,
                         ask_price=ask_price,
                         available_cash=per_position_cash,
-                        forecast_probability=forecast.probability_yes,
+                        forecast_probability=target_probability,
                     )
             else:
-                kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
+                kelly = kelly_fraction_for_probability(ask_price, target_probability)
                 notional = min(
                     config.max_position_notional,
                     per_position_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
@@ -990,6 +1074,8 @@ class StrategyEngine:
             quantity = _apply_volume_cap(quantity, config, market)
             if quantity >= MIN_ORDER_QUANTITY:
                 label = "Pyramid add" if has_yes_position else "Resolution convergence"
+                if is_multi_outcome:
+                    label = "Multi-outcome resolution convergence"
                 return [
                     OrderIntent(
                         strategy_name=config.name,
@@ -1002,9 +1088,15 @@ class StrategyEngine:
                         kelly_fraction=config.kelly_fraction,
                         edge_bps=net_edge_bps,
                         holding_period_minutes=int(hours_to_res * 60),
-                        thesis=(f"{label}: {hours_to_res:.0f}h to resolution, mid={market.mid:.2f}"),
+                        thesis=(
+                            f"{label}: {hours_to_res:.0f}h to resolution, "
+                            f"model={target_probability:.3f} market={ask_price:.3f}"
+                        ),
                     ),
                 ]
+
+        if is_multi_outcome:
+            return []
 
         no_price = no_ask_price(market)
         no_edge_bps = (market.best_bid - forecast.probability_yes) * 10_000.0

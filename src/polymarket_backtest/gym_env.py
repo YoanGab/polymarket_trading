@@ -48,6 +48,8 @@ class PolymarketGymEnv(gym.Env[np.ndarray, int]):
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
+        if seed is not None:
+            self.env._core._rng.seed(seed)
         market_id = options.get("market_id") if options is not None else None
         state = self.env.reset(market_id=market_id)
         return state.to_array(), {"state": state}

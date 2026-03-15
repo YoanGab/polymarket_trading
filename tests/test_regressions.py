@@ -9,6 +9,7 @@ import pytest
 
 from polymarket_backtest import db
 from polymarket_backtest.downloaders import goldsky
+from polymarket_backtest.features import MAX_FEATURE_LOOKBACK
 from polymarket_backtest.grid_search import expanded_strategy_grid
 from polymarket_backtest.grok_replay import _parse_forecast_output
 from polymarket_backtest.market_simulator import MarketSimulator
@@ -257,6 +258,150 @@ def test_ml_transport_uses_prev_snapshots_for_history_features() -> None:
     assert captured["price_range_24h"] == pytest.approx(0.23)
 
 
+def test_ml_transport_surfaces_long_horizon_history_features() -> None:
+    transport = object.__new__(MLModelTransport)
+    transport.agent_name = "ml_model"
+    transport.model_id = "lightgbm"
+    transport._feature_names = [
+        "momentum_72h",
+        "momentum_168h",
+        "volatility_168h",
+        "price_range_168h",
+        "price_vs_mean_168h",
+        "price_range_720h",
+        "price_vs_mean_720h",
+        "distance_to_720h_high",
+        "distance_to_720h_low",
+    ]
+    captured: dict[str, float] = {}
+
+    def _capture_predict(X: np.ndarray) -> np.ndarray:
+        captured.update(dict(zip(transport._feature_names, X[0], strict=True)))
+        return np.array([0.62], dtype=np.float32)
+
+    transport._predict = _capture_predict
+
+    base_ts = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    prev_mids = [0.10 + (i * 0.001) for i in range(MAX_FEATURE_LOOKBACK)]
+    prev_snapshots = []
+    for index, mid in enumerate(prev_mids):
+        prev_snapshots.append(
+            {
+                "market_id": "market-1",
+                "ts": isoformat(base_ts + timedelta(hours=index)),
+                "best_bid": mid - 0.01,
+                "best_ask": mid + 0.01,
+                "mid": mid,
+                "last_trade": mid,
+                "volume_1m": 100.0 + index,
+                "volume_24h": 1_000.0 + index,
+                "open_interest": 500.0,
+                "resolution_ts": isoformat(base_ts + timedelta(days=40)),
+            }
+        )
+
+    current_mid = 0.82
+    MLModelTransport.complete(
+        transport,
+        model_release="test-release",
+        system_prompt="",
+        context_bundle={
+            "as_of": isoformat(base_ts + timedelta(hours=MAX_FEATURE_LOOKBACK)),
+            "market": {
+                "market_id": "market-1",
+                "best_bid": current_mid - 0.01,
+                "best_ask": current_mid + 0.01,
+                "mid": current_mid,
+                "last_trade": current_mid,
+                "volume_1m": 500.0,
+                "volume_24h": 3_000.0,
+                "open_interest": 500.0,
+                "resolution_ts": isoformat(base_ts + timedelta(days=40)),
+            },
+            "prev_snapshots": prev_snapshots,
+        },
+    )
+
+    mids_168 = prev_mids[-168:]
+    mids_720 = prev_mids[-MAX_FEATURE_LOOKBACK:]
+    assert captured["momentum_72h"] == pytest.approx(current_mid - prev_mids[-72])
+    assert captured["momentum_168h"] == pytest.approx(current_mid - prev_mids[-168])
+    assert captured["volatility_168h"] == pytest.approx(float(np.std(mids_168)))
+    assert captured["price_range_168h"] == pytest.approx(max(mids_168) - min(mids_168))
+    assert captured["price_vs_mean_168h"] == pytest.approx(current_mid - float(np.mean(mids_168)))
+    assert captured["price_range_720h"] == pytest.approx(max(mids_720) - min(mids_720))
+    assert captured["price_vs_mean_720h"] == pytest.approx(current_mid - float(np.mean(mids_720)))
+    assert captured["distance_to_720h_high"] == pytest.approx(max(mids_720) - current_mid)
+    assert captured["distance_to_720h_low"] == pytest.approx(current_mid - min(mids_720))
+
+
+def test_preload_market_data_keeps_hourly_history_when_eval_stride_skips_decisions(tmp_path) -> None:
+    engine, strategy, base_ts, market_id = _build_engine(tmp_path)
+
+    for hour in range(10):
+        mid = 0.30 + (hour * 0.01)
+        db.add_snapshot(
+            engine.conn,
+            market_id=market_id,
+            ts=base_ts + timedelta(hours=hour),
+            status="active",
+            best_bid=mid - 0.01,
+            best_ask=mid + 0.01,
+            last_trade=mid,
+            volume_1m=100.0 + hour,
+            volume_24h=1_000.0 + (hour * 10.0),
+            open_interest=500.0,
+            tick_size=0.01,
+            orderbook=[
+                ("bid", 1, mid - 0.01, 100.0),
+                ("ask", 1, mid + 0.01, 100.0),
+            ],
+        )
+    engine.conn.commit()
+
+    engine = ReplayEngine(
+        conn=engine.conn,
+        config=ReplayConfig(
+            experiment_name="regression-test-strided",
+            starting_cash=1_000.0,
+            lookback_minutes=60,
+            eval_stride=4,
+        ),
+        grok=engine.grok,
+        strategies=[strategy],
+    )
+
+    timelines = engine._build_market_timelines([market_id])
+    assert [isoformat(ts) for ts in timelines[market_id]] == [
+        isoformat(base_ts + timedelta(hours=0)),
+        isoformat(base_ts + timedelta(hours=4)),
+        isoformat(base_ts + timedelta(hours=8)),
+        isoformat(base_ts + timedelta(hours=9)),
+    ]
+
+    engine._preload_market_data(timelines)
+
+    assert len(engine._history_by_market[market_id]) == 10
+    assert sorted(ts for mid, ts in engine._market_cache if mid == market_id) == [
+        isoformat(base_ts + timedelta(hours=0)),
+        isoformat(base_ts + timedelta(hours=4)),
+        isoformat(base_ts + timedelta(hours=8)),
+        isoformat(base_ts + timedelta(hours=9)),
+    ]
+
+    history = engine._get_market_history(
+        market_id,
+        base_ts + timedelta(hours=8),
+        lookback=4,
+    )
+    assert [snapshot["ts"] for snapshot in history] == [
+        isoformat(base_ts + timedelta(hours=4)),
+        isoformat(base_ts + timedelta(hours=5)),
+        isoformat(base_ts + timedelta(hours=6)),
+        isoformat(base_ts + timedelta(hours=7)),
+    ]
+
+
 def test_market_simulator_passive_fill_earns_maker_rebate_by_default() -> None:
     simulator = MarketSimulator()
     market = _make_market_state(datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
@@ -465,8 +610,8 @@ def test_process_market_snapshot_passes_prev_snapshots_to_forecast() -> None:
     assert captured["market_id"] == market.market_id
     assert captured["timestamp"] == market.ts
     assert captured["market_state"] == market
-    assert len(captured["prev_snapshots"]) == 24
-    assert captured["prev_snapshots"][0]["ts"] == isoformat(market.ts - timedelta(hours=24))
+    assert len(captured["prev_snapshots"]) == 30
+    assert captured["prev_snapshots"][0]["ts"] == isoformat(market.ts - timedelta(hours=30))
     assert captured["prev_snapshots"][-1]["ts"] == isoformat(market.ts - timedelta(hours=1))
 
 

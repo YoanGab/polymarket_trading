@@ -59,6 +59,8 @@ def ingest_gamma_markets(conn: sqlite3.Connection, raw_markets: list[dict[str, A
                 "title": parsed["title"],
                 "domain": parsed["domain"],
                 "market_type": "binary",
+                "event_id": parsed.get("event_id"),
+                "tags": parsed.get("tags", []),
                 "open_ts": resolution_ts - APPROX_OPEN_LOOKBACK,
                 "close_ts": resolution_ts,
                 "resolution_ts": resolution_ts,

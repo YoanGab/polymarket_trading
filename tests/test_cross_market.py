@@ -139,6 +139,40 @@ def test_cross_market_tracker_returns_event_correlations(tmp_path: Path) -> None
         assert related[0].correlation == pytest.approx(1.0)
 
 
+def test_market_state_includes_outcome_tokens_for_shared_event(tmp_path: Path) -> None:
+    db_path = tmp_path / "multi_outcome.sqlite"
+    with closing(db.connect(db_path)) as conn:
+        db.init_db(conn)
+        base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        final_ts = _add_market_series(
+            conn,
+            market_id="market_a",
+            event_id="event_shared",
+            mids=[0.20, 0.24, 0.28],
+            base_ts=base_ts,
+        )
+        _add_market_series(
+            conn,
+            market_id="market_b",
+            event_id="event_shared",
+            mids=[0.30, 0.29, 0.27],
+            base_ts=base_ts,
+        )
+        _add_market_series(
+            conn,
+            market_id="market_c",
+            event_id="event_shared",
+            mids=[0.50, 0.47, 0.45],
+            base_ts=base_ts,
+        )
+
+        market_state = db.get_market_state_as_of(conn, "market_a", final_ts)
+
+        assert market_state is not None
+        assert market_state.outcome_count == 3
+        assert market_state.outcome_tokens == ["market_a", "market_b", "market_c"]
+
+
 def test_replay_engine_passes_related_market_prices_to_strategies(tmp_path: Path) -> None:
     db_path = tmp_path / "replay_related.sqlite"
     with closing(db.connect(db_path)) as conn:
@@ -186,6 +220,66 @@ def test_replay_engine_passes_related_market_prices_to_strategies(tmp_path: Path
         assert market_b["mid"] == pytest.approx(0.52)
         assert market_b["correlation"] == pytest.approx(1.0)
         assert market_b["event_id"] == "event_shared"
+
+
+def test_replay_engine_executes_related_market_orders_on_related_market_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "replay_related_execution.sqlite"
+    with closing(db.connect(db_path)) as conn:
+        db.init_db(conn)
+        base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        final_ts = _add_market_series(
+            conn,
+            market_id="market_a",
+            event_id="event_shared",
+            mids=[0.40, 0.45, 0.50],
+            base_ts=base_ts,
+        )
+        _add_market_series(
+            conn,
+            market_id="market_b",
+            event_id="event_shared",
+            mids=[0.42, 0.47, 0.52],
+            base_ts=base_ts,
+        )
+        strategy = _strategy()
+        engine = _make_engine(conn, strategy=strategy, experiment_name="replay-related-execution")
+        engine._preload_market_data({"market_a": [final_ts], "market_b": [final_ts]})
+
+        def _forecast_stub(market_id, as_of, *, market_state=None, prev_snapshots=None):
+            return _forecast(market_id, as_of), "prompt-hash", "context-hash"
+
+        def _capture_execute(portfolio, market, next_market, order, entry_probability):
+            captured["execution_market_id"] = market.market_id
+            captured["order_market_id"] = order.market_id
+            captured["entry_probability"] = entry_probability
+
+        captured: dict[str, object] = {}
+        engine.grok.forecast = _forecast_stub
+        engine._execute_order = _capture_execute
+        engine.strategy_engine = SimpleNamespace(
+            should_exit=lambda **_: False,
+            decide=lambda **_: [
+                OrderIntent(
+                    strategy_name=strategy.name,
+                    market_id="market_b",
+                    ts=final_ts,
+                    side="buy",
+                    liquidity_intent="aggressive",
+                    limit_price=0.53,
+                    requested_quantity=1.0,
+                    kelly_fraction=strategy.kelly_fraction,
+                    edge_bps=100.0,
+                    holding_period_minutes=strategy.max_holding_minutes,
+                    thesis="Cross-outcome basket leg",
+                )
+            ],
+        )
+
+        engine._process_market_snapshot("market_a", final_ts)
+
+        assert captured["execution_market_id"] == "market_b"
+        assert captured["order_market_id"] == "market_b"
+        assert captured["entry_probability"] == pytest.approx(0.55)
 
 
 def test_market_making_strategy_quotes_both_sides_and_skews_inventory() -> None:
