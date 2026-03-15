@@ -348,15 +348,15 @@ def train_xgboost(
     params = {
         "objective": "binary:logistic",
         "eval_metric": "logloss",
-        "eta": 0.03,
+        "eta": 0.02,
         "max_depth": 0,  # unlimited depth for lossguide
         "max_leaves": 384,
         "grow_policy": "lossguide",
         "min_child_weight": 200,
         "subsample": 0.5,
         "colsample_bytree": 0.3,
-        "reg_alpha": 8.0,
-        "reg_lambda": 25.0,
+        "reg_alpha": 5.0,
+        "reg_lambda": 18.0,
         "seed": 42,
     }
 
