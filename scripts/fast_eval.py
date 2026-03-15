@@ -75,6 +75,7 @@ def simulate_trades(
     kelly_fraction: float = 0.15,
     max_position: float = 500.0,
     starting_cash: float = 1000.0,
+    sell_only: bool = False,
 ) -> dict[str, float]:
     """Simulate edge-based trading and compute Sharpe.
 
@@ -93,6 +94,11 @@ def simulate_trades(
         market_id = str(market_ids[i])
 
         edge = pred - mid
+
+        # Optionally skip buy signals (positive edge = model says price too low)
+        if sell_only and edge > 0:
+            continue
+
         if abs(edge) < edge_threshold:
             continue
 
@@ -178,26 +184,29 @@ def main():
     print(f"Unique val markets: {len(set(market_ids))}")
     print()
 
-    for edge_bps in [50, 100, 150, 200, 300]:
-        result = simulate_trades(
-            predictions,
-            y_val,
-            market_ids,
-            mid_prices,
-            edge_threshold_bps=edge_bps,
-            kelly_fraction=args.kelly,
-            max_position=args.max_position,
-        )
-        print(
-            f"  edge={edge_bps:4d}bps"
-            f"  Sharpe={result['sharpe']:+.4f}"
-            f"  PnL={result['pnl']:+10.2f}"
-            f"  trades={result['trades']:6d}"
-            f"  win_rate={result['win_rate']:.3f}"
-            f"  avg_pnl={result['avg_pnl_per_trade']:+.2f}"
-        )
+    for mode_label, sell_flag in [("all", False), ("sell-only", True)]:
+        print(f"  [{mode_label}]")
+        for edge_bps in [50, 100, 150, 200, 300]:
+            result = simulate_trades(
+                predictions,
+                y_val,
+                market_ids,
+                mid_prices,
+                edge_threshold_bps=edge_bps,
+                kelly_fraction=args.kelly,
+                max_position=args.max_position,
+                sell_only=sell_flag,
+            )
+            print(
+                f"    edge={edge_bps:4d}bps"
+                f"  Sharpe={result['sharpe']:+.4f}"
+                f"  PnL={result['pnl']:+10.2f}"
+                f"  trades={result['trades']:6d}"
+                f"  win_rate={result['win_rate']:.3f}"
+                f"  avg_pnl={result['avg_pnl_per_trade']:+.2f}"
+            )
 
-    # Report the main result at the requested threshold
+    # Report best result (sell-only at default threshold)
     result = simulate_trades(
         predictions,
         y_val,
@@ -206,6 +215,7 @@ def main():
         edge_threshold_bps=args.edge_threshold,
         kelly_fraction=args.kelly,
         max_position=args.max_position,
+        sell_only=True,
     )
     print(
         f"\nRESULT"
