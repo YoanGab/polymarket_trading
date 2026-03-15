@@ -44,6 +44,8 @@ def predict_model(model: object, X: np.ndarray) -> np.ndarray:
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
         raw = model["xgb_model"].predict(dmat)
+        if model.get("raw_logits"):
+            raw = 1.0 / (1.0 + np.exp(-raw))
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         if "platt" in model:

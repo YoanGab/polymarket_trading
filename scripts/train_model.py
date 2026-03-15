@@ -342,11 +342,24 @@ def train_xgboost(
     X_scaled = scaler.fit_transform(train_X)
     val_scaled = scaler.transform(val_X)
 
+    # Focal loss: downweight easy examples, focus on hard cases
+    def focal_binary_obj(preds, dtrain, gamma=2.0):
+        """Focal loss gradient and hessian for binary classification."""
+        labels = dtrain.get_label()
+        p = 1.0 / (1.0 + np.exp(-preds))
+        grad = p - labels  # same as logloss gradient
+        # Focal weighting: (1-pt)^gamma where pt = p for y=1, (1-p) for y=0
+        pt = np.where(labels == 1, p, 1 - p)
+        focal_weight = (1 - pt) ** gamma
+        grad = focal_weight * grad
+        hess = focal_weight * p * (1 - p)
+        return grad, hess
+
     dtrain = xgb.DMatrix(X_scaled, label=train_y)
     dval = xgb.DMatrix(val_scaled, label=val_y)
 
     params = {
-        "objective": "binary:logistic",
+        "disable_default_eval_metric": True,
         "eval_metric": "logloss",
         "eta": 0.02,
         "max_depth": 0,  # unlimited depth for lossguide
@@ -367,6 +380,16 @@ def train_xgboost(
         evals=[(dval, "val")],
         early_stopping_rounds=120,
         verbose_eval=False,
+        obj=focal_binary_obj,
+        custom_metric=lambda preds, dtrain: (
+            "logloss",
+            float(
+                -np.mean(
+                    dtrain.get_label() * np.log(np.clip(1 / (1 + np.exp(-preds)), 1e-7, 1 - 1e-7))
+                    + (1 - dtrain.get_label()) * np.log(np.clip(1 - 1 / (1 + np.exp(-preds)), 1e-7, 1 - 1e-7))
+                )
+            ),
+        ),
     )
 
     # Isotonic calibration on held-out portion of training data
@@ -375,14 +398,16 @@ def train_xgboost(
     cal_size = min(len(train_y) // 10, 500000)
     rng = np.random.RandomState(42)
     cal_idx = rng.choice(len(train_y), cal_size, replace=False)
-    cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
+    raw_cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
+    # Apply sigmoid since focal loss outputs raw logits
+    cal_preds = 1.0 / (1.0 + np.exp(-raw_cal_preds))
     cal_labels = train_y[cal_idx]
 
     calibrator = IsotonicRegression(y_min=0.001, y_max=0.999, out_of_bounds="clip")
     calibrator.fit(cal_preds, cal_labels)
     print(f"  XGBoost: isotonic calibration on {cal_size} train samples")
 
-    return {"xgb_model": model, "scaler": scaler, "calibrator": calibrator}
+    return {"xgb_model": model, "scaler": scaler, "calibrator": calibrator, "raw_logits": True}
 
 
 def train_catboost(
@@ -1003,6 +1028,9 @@ def predict(model: object, X: np.ndarray) -> np.ndarray:
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
         raw = model["xgb_model"].predict(dmat)
+        # Apply sigmoid if model outputs raw logits (focal loss)
+        if model.get("raw_logits"):
+            raw = 1.0 / (1.0 + np.exp(-raw))
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         if "platt" in model:
