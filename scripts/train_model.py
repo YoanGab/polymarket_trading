@@ -1079,10 +1079,12 @@ def main() -> None:
         print(f"  Markets: {len(set(dataset.market_ids))}")
         split = walk_forward_split(dataset)
 
-    # Drop features unavailable at inference (ml_transport passes prev_rows=[] and no tags)
-    # Keep only features that extract_snapshot_features produces with no history
+    # Drop features unavailable at inference.
+    # ml_transport.py now passes prev_snapshots from context_bundle,
+    # so momentum/volatility features ARE available at inference.
+    # Still exclude: best_bid, best_ask, last_trade (copied to output),
+    # tag features (not in context_bundle), n_tags.
     INFERENCE_AVAILABLE = {
-        # Only mid as price anchor — gives direction without bid/ask copying
         "mid",
         "spread",
         "spread_pct",
@@ -1099,6 +1101,19 @@ def main() -> None:
         "hours_to_resolution",
         "log_hours_to_resolution",
         "resolution_proximity",
+        # Momentum features — now available via prev_snapshots
+        "momentum_3h",
+        "momentum_3h_pct",
+        "momentum_6h",
+        "momentum_6h_pct",
+        "momentum_12h",
+        "momentum_12h_pct",
+        "momentum_24h",
+        "momentum_24h_pct",
+        # Volatility and range — now available via prev_snapshots
+        "volatility_24h",
+        "volume_trend",
+        "price_range_24h",
     }
     keep_idx = [i for i, name in enumerate(feature_names) if name in INFERENCE_AVAILABLE]
     dropped = [name for name in feature_names if name not in INFERENCE_AVAILABLE]
