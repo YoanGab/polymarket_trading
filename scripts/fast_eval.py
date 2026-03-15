@@ -43,18 +43,10 @@ def predict_model(model: object, X: np.ndarray) -> np.ndarray:
 
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
-        xgb_model = model["xgb_model"]
-        if isinstance(xgb_model, list):
-            raw = np.mean([m.predict(dmat) for m in xgb_model], axis=0)
-        else:
-            raw = xgb_model.predict(dmat)
+        raw = model["xgb_model"].predict(dmat)
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         return np.clip(raw, 0.001, 0.999)
-    if isinstance(model, dict) and "boosted_lr" in model:
-        lr_preds = predict_model(model["lr"], X)
-        residual = model["lgb_residual"].predict(X)
-        return np.clip(lr_preds + residual, 0.001, 0.999)
     if isinstance(model, dict) and "ensemble" in model:
         preds = [predict_model(m, X) * w for m, w in zip(model["ensemble"], model["weights"])]
         return np.clip(sum(preds), 0.001, 0.999)  # type: ignore[arg-type]
