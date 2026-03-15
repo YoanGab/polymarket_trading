@@ -355,8 +355,8 @@ def train_xgboost(
         "min_child_weight": 200,
         "subsample": 0.5,
         "colsample_bytree": 0.3,
-        "reg_alpha": 8.0,
-        "reg_lambda": 25.0,
+        "reg_alpha": 3.0,
+        "reg_lambda": 15.0,
         "seed": 42,
     }
 
