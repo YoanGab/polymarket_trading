@@ -154,6 +154,13 @@ Status: `keep`, `discard`, or `crash`. Do NOT commit this file.
 
 All else being equal, simpler is better. A tiny improvement with lots of complexity? Probably not worth it. Same performance with less code? Always keep.
 
+## Human feedback (updated 2026-03-15 — RE-READ THIS ON EVERY CYCLE)
+
+- **Reduce `max_portfolio_pct`.** The current default of 0.50 (50% of cash in one position) is too aggressive for production. Reduce it to 0.15–0.25 across all strategy configs. This matters for realistic PnL estimates and avoids ruin risk from a single bad bet.
+- **Add a minimum volume filter.** Only trade markets with `volume_24h >= 50000`. Note: `volume_24h` in the DB is lifetime total Gamma volume, not actual daily volume. At $50K lifetime, a $3,500 bet is ~7% of all volume ever traded — already borderline. This filters out illiquid markets where our orders wouldn't realistically execute. **Where to add it:** You may edit `prepare.py` once to add this filter (exception to the "do not edit" rule — human-approved). Filter out markets with `MAX(volume_24h) < 50000` during dataset building, then re-run `uv run python scripts/prepare.py` to regenerate the .npz files. Also add the same filter in `grid_search.py` for strategy eval — filter `market_ids` by `MAX(volume_24h) >= 50000` before passing them to the replay engine.
+- **Push after committing.** Run `git push` after each `git commit`.
+- **NEVER use simplified/proxy environments for evaluation.** Always train and evaluate on the full realistic environment (TradingEnvironment / ReplayEngine). No "fast_eval" or idealized simulations — they give misleading results. The full env handles cash constraints, order execution, slippage, position management, and realistic fills. If eval is slow, optimize the env, don't skip it.
+
 ## NEVER STOP
 
 Once the loop begins, do NOT pause. The human may be asleep. Continue working autonomously until manually stopped. If you run out of ideas, re-read this file, analyze what features drive predictions, try combining near-misses, try radically different approaches. The loop runs until interrupted.

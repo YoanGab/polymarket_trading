@@ -178,6 +178,20 @@ class StrategyEngine:
                     on_missed_trade=on_missed_trade,
                 )
             )
+        elif config.family == "sell_edge":
+            orders.extend(
+                self._sell_edge(
+                    config,
+                    market,
+                    forecast,
+                    no_position,
+                    available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    on_missed_trade=on_missed_trade,
+                )
+            )
         elif config.family == "mean_reversion":
             orders.extend(self._mean_reversion(config, market, forecast, yes_position, available_cash))
         elif config.family == "contrarian":
@@ -602,6 +616,91 @@ class StrategyEngine:
                     thesis=forecast.thesis,
                 )
             ]
+        return []
+
+    def _sell_edge(
+        self,
+        config: StrategyConfig,
+        market: MarketState,
+        forecast: ForecastOutput,
+        no_position: PositionState | None,
+        available_cash: float,
+        *,
+        portfolio_cash: float | None = None,
+        starting_cash: float | None = None,
+        total_invested: float | None = None,
+        on_missed_trade: Callable[[float, str], None] | None = None,
+    ) -> list[OrderIntent]:
+        """Buy NO contracts when model says YES is overpriced (sell-side edge)."""
+        if forecast.confidence < config.min_confidence:
+            return []
+
+        # Only enter when model predicts YES price is too HIGH (sell signal)
+        no_ask = no_ask_price(market)
+        no_probability = 1.0 - forecast.probability_yes
+        # Edge: how much cheaper NO is compared to model's fair value
+        edge_bps = (no_probability - no_ask) * 10_000.0
+        fee_bps = estimated_fee_bps(no_ask, market.fee_rate)
+        net_edge_bps = edge_bps - fee_bps
+
+        if no_position is None or no_position.quantity <= 0:
+            # Buy NO when model says YES is overpriced
+            if net_edge_bps >= config.edge_threshold_bps:
+                per_position_cash = self._entry_cash_cap(
+                    config=config,
+                    available_cash=available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    edge_bps=net_edge_bps,
+                    on_missed_trade=on_missed_trade,
+                )
+                if per_position_cash <= 0:
+                    return []
+                kelly = kelly_fraction_for_yes(no_ask, no_probability)
+                notional = min(config.max_position_notional, per_position_cash * config.kelly_fraction * kelly)
+                if notional <= 0:
+                    return []
+                quantity = _apply_volume_cap(notional / no_ask, config, market)
+                if quantity < MIN_ORDER_QUANTITY:
+                    return []
+                return [
+                    OrderIntent(
+                        strategy_name=config.name,
+                        market_id=market.market_id,
+                        ts=market.ts,
+                        side="buy",
+                        liquidity_intent="aggressive" if config.aggressive_entry else "passive",
+                        limit_price=no_ask if config.aggressive_entry else no_bid_price(market),
+                        requested_quantity=quantity,
+                        kelly_fraction=config.kelly_fraction,
+                        edge_bps=net_edge_bps,
+                        holding_period_minutes=config.max_holding_minutes,
+                        thesis=forecast.thesis,
+                        is_no_bet=True,
+                    )
+                ]
+        else:
+            # Exit NO position if edge disappeared
+            no_bid = no_bid_price(market)
+            exit_edge = (no_bid - no_probability) * 10_000.0
+            if exit_edge >= config.edge_threshold_bps:
+                return [
+                    OrderIntent(
+                        strategy_name=config.name,
+                        market_id=market.market_id,
+                        ts=market.ts,
+                        side="sell",
+                        liquidity_intent="aggressive",
+                        limit_price=no_bid,
+                        requested_quantity=no_position.quantity,
+                        kelly_fraction=config.kelly_fraction,
+                        edge_bps=exit_edge,
+                        holding_period_minutes=0,
+                        thesis=forecast.thesis,
+                        is_no_bet=True,
+                    )
+                ]
         return []
 
     def _mean_reversion(
