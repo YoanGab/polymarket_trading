@@ -183,4 +183,4 @@ Once the loop begins, do NOT pause. The human may be asleep. Continue working au
 - **Perplexity** (`mcp__perplexity-ask__perplexity_ask`): Use for researching best practices, library docs, algorithm comparisons. Example: "What is the best RL algorithm for financial trading?" or "How to implement prioritized experience replay in MLX?"
 - **Firecrawl** (`mcp__Firecrawl__firecrawl_search`): Use for scraping documentation, GitHub repos, papers.
 - **Context7** (`mcp__plugin_context7_context7__resolve-library-id`): Use for library-specific documentation (PyTorch, MLX, gymnasium, etc.)
-- You are encouraged to research before implementing. Don't guess — look up the best approach.
+- You are encouraged to research before implementing. Iterate — look up for new ideas, don't take what's on the research for granted, do your own experiments.
