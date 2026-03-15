@@ -406,29 +406,29 @@ class _TradingCore:
             actions.append(Action.cancel_orders())
         return actions
 
-    def step_episode(self, episode: _MarketEpisode, action: Action) -> StepResult:
-        if episode.done:
-            raise RuntimeError(f"Episode for market {episode.market_id} is already done")
+    def _execute_single_action(
+        self,
+        episode: _MarketEpisode,
+        action: Action,
+        current_market: MarketState,
+        next_market: MarketState | None,
+    ) -> tuple[list[FillResult], dict[str, Any]]:
+        """Execute one action at the current timestamp without advancing time.
 
-        current_market = self._market_state_for_episode(episode)
-        next_market = self._next_market_state_for_episode(episode)
-        before_value = self.portfolio_value(active_markets={episode.market_id: current_market})
-
-        info: dict[str, Any] = {
-            "action": action,
-            "fills": [],
-            "cancelled_orders": 0,
-            "pending_orders_before": len(self.pending_orders),
-        }
+        Returns:
+            A tuple of (fill_records, extra_info) where extra_info contains
+            action-specific metadata (cancelled_orders, redeemed_quantity, etc.).
+        """
+        extra_info: dict[str, Any] = {}
         fill_records: list[FillResult] = []
 
         if action.action_type == "cancel_orders":
-            info["cancelled_orders"] = len(self.pending_orders)
+            extra_info["cancelled_orders"] = len(self.pending_orders)
             self.pending_orders.clear()
         elif action.action_type == "mint_pair":
             fill_records.extend(self._mint_pair(episode, current_market, action))
         elif action.action_type == "redeem_pair":
-            info["redeemed_quantity"] = self._redeem_pair(episode.market_id, current_market, action.quantity)
+            extra_info["redeemed_quantity"] = self._redeem_pair(episode.market_id, current_market, action.quantity)
         elif action.action_type != "hold":
             intent = self._action_to_intent(action, current_market)
             if intent is not None:
@@ -443,8 +443,11 @@ class _TradingCore:
                         remaining_quantity=intent.requested_quantity,
                     )
 
-        fill_records.extend(self._process_pending_orders(current_market, next_market, episode.market_id))
+        return fill_records, extra_info
 
+    def _advance_episode(self, episode: _MarketEpisode, current_market: MarketState) -> None:
+        """Advance the episode to the next snapshot and handle settlement."""
+        next_market = self._next_market_state_for_episode(episode)
         if next_market is not None:
             episode.index += 1
         else:
@@ -455,10 +458,31 @@ class _TradingCore:
         if episode.resolution_ts is not None and ensure_utc(settlement_ts) >= ensure_utc(episode.resolution_ts):
             episode.done = True
 
+    def step_episode(self, episode: _MarketEpisode, action: Action) -> StepResult:
+        if episode.done:
+            raise RuntimeError(f"Episode for market {episode.market_id} is already done")
+
+        current_market = self._market_state_for_episode(episode)
+        next_market = self._next_market_state_for_episode(episode)
+        before_value = self.portfolio_value(active_markets={episode.market_id: current_market})
+
+        fill_records, extra_info = self._execute_single_action(episode, action, current_market, next_market)
+        fill_records.extend(self._process_pending_orders(current_market, next_market, episode.market_id))
+
+        self._advance_episode(episode, current_market)
+
         state = self.build_state(episode)
         after_value = self.portfolio_value(active_markets={episode.market_id: self._market_state_for_episode(episode)})
-        info["fills"] = [self._fill_to_dict(fill) for fill in fill_records]
-        info["pending_orders_after"] = len(self.pending_orders)
+
+        info: dict[str, Any] = {
+            "action": action,
+            "cancelled_orders": extra_info.get("cancelled_orders", 0),
+            "pending_orders_before": len(self.pending_orders),
+            "fills": [self._fill_to_dict(fill) for fill in fill_records],
+            "pending_orders_after": len(self.pending_orders),
+        }
+        if "redeemed_quantity" in extra_info:
+            info["redeemed_quantity"] = extra_info["redeemed_quantity"]
 
         total_qty = sum(fill.quantity for fill in fill_records)
         total_fee = sum(fill.fee_usdc - fill.rebate_usdc for fill in fill_records)
@@ -471,6 +495,61 @@ class _TradingCore:
             new_state=state,
             done=episode.done,
             info=info,
+            filled_quantity=total_qty,
+            fill_price=fill_price,
+            fee_paid=total_fee,
+            slippage_bps=slippage_bps,
+        )
+
+    def step_multi_episode(self, episode: _MarketEpisode, actions: list[Action]) -> StepResult:
+        """Execute multiple actions at the same timestamp, then advance.
+
+        This allows placing multiple orders simultaneously (e.g., buy YES +
+        set limit sell) before the market moves to the next snapshot.
+        """
+        if episode.done:
+            raise RuntimeError(f"Episode for market {episode.market_id} is already done")
+
+        current_market = self._market_state_for_episode(episode)
+        next_market = self._next_market_state_for_episode(episode)
+        before_value = self.portfolio_value(active_markets={episode.market_id: current_market})
+
+        all_fill_records: list[FillResult] = []
+        merged_info: dict[str, Any] = {
+            "actions": list(actions),
+            "cancelled_orders": 0,
+            "pending_orders_before": len(self.pending_orders),
+        }
+
+        for action in actions:
+            fill_records, extra_info = self._execute_single_action(episode, action, current_market, next_market)
+            all_fill_records.extend(fill_records)
+            merged_info["cancelled_orders"] += extra_info.get("cancelled_orders", 0)
+            if "redeemed_quantity" in extra_info:
+                merged_info.setdefault("redeemed_quantity", 0.0)
+                merged_info["redeemed_quantity"] += extra_info["redeemed_quantity"]
+
+        all_fill_records.extend(self._process_pending_orders(current_market, next_market, episode.market_id))
+
+        self._advance_episode(episode, current_market)
+
+        state = self.build_state(episode)
+        after_value = self.portfolio_value(active_markets={episode.market_id: self._market_state_for_episode(episode)})
+
+        merged_info["fills"] = [self._fill_to_dict(fill) for fill in all_fill_records]
+        merged_info["pending_orders_after"] = len(self.pending_orders)
+
+        total_qty = sum(fill.quantity for fill in all_fill_records)
+        total_fee = sum(fill.fee_usdc - fill.rebate_usdc for fill in all_fill_records)
+        fill_price = sum(fill.price * fill.quantity for fill in all_fill_records) / total_qty if total_qty > 0 else 0.0
+        slippage_bps = (
+            sum(fill.impact_bps * fill.quantity for fill in all_fill_records) / total_qty if total_qty > 0 else 0.0
+        )
+        return StepResult(
+            reward=after_value - before_value,
+            new_state=state,
+            done=episode.done,
+            info=merged_info,
             filled_quantity=total_qty,
             fill_price=fill_price,
             fee_paid=total_fee,
@@ -1094,6 +1173,20 @@ class TradingEnvironment:
             self.reset()
         assert self._episode is not None
         return self._core.step_episode(self._episode, action)
+
+    def step_multi(self, actions: list[Action]) -> StepResult:
+        """Execute multiple actions at the same timestamp, then advance.
+
+        On real Polymarket a trader can place multiple orders simultaneously
+        (e.g., buy YES + set a limit sell).  This method accepts a list of
+        actions, executes them all at the current snapshot, and then advances
+        to the next snapshot -- unlike ``step()`` which handles only one action
+        per time step.
+        """
+        if self._episode is None:
+            self.reset()
+        assert self._episode is not None
+        return self._core.step_multi_episode(self._episode, actions)
 
     @property
     def done(self) -> bool:

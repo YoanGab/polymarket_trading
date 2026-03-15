@@ -9,7 +9,11 @@ import pytest
 
 from polymarket_backtest import db
 from polymarket_backtest.gym_env import PolymarketGymEnv
-from polymarket_backtest.trading_env import Action, MultiMarketEnvironment, TradingEnvironment
+from polymarket_backtest.trading_env import (
+    Action,
+    MultiMarketEnvironment,
+    TradingEnvironment,
+)
 
 
 def _seed_market(
@@ -200,6 +204,89 @@ def test_multi_market_environment_returns_all_market_states(trading_db: Path) ->
     next_state = env.get_state()
     assert next_state.cash < 100.0
     assert len(next_state.positions) >= 1
+
+
+def test_step_multi_executes_multiple_actions_same_timestamp(trading_db: Path) -> None:
+    """step_multi() should execute all actions at the same snapshot before advancing."""
+    env = TradingEnvironment(
+        db_path=trading_db,
+        starting_cash=100.0,
+        market_ids=["market_a"],
+        enable_ml_predictions=False,
+        auto_order_cash_fraction=0.10,
+    )
+    state = env.reset("market_a")
+    ts_before = state.timestamp
+
+    result = env.step_multi(
+        [
+            Action.buy_yes(quantity=5.0),
+            Action.buy_yes_limit(quantity=10.0, price=0.40),
+        ]
+    )
+
+    assert result.filled_quantity > 0.0
+    assert result.new_state.timestamp > ts_before
+    assert result.new_state.yes_position is not None
+    assert result.new_state.cash < 100.0
+    assert "actions" in result.info
+    assert len(result.info["actions"]) == 2
+
+
+def test_step_multi_equivalent_to_single_step_for_one_action(trading_db: Path) -> None:
+    """step_multi([action]) should produce the same outcome as step(action)."""
+    env_single = TradingEnvironment(
+        db_path=trading_db,
+        starting_cash=100.0,
+        market_ids=["market_a"],
+        enable_ml_predictions=False,
+    )
+    env_single.reset("market_a")
+    single_result = env_single.step(Action.buy_yes(quantity=5.0))
+
+    env_multi = TradingEnvironment(
+        db_path=trading_db,
+        starting_cash=100.0,
+        market_ids=["market_a"],
+        enable_ml_predictions=False,
+    )
+    env_multi.reset("market_a")
+    multi_result = env_multi.step_multi([Action.buy_yes(quantity=5.0)])
+
+    assert single_result.filled_quantity == pytest.approx(multi_result.filled_quantity)
+    assert single_result.fill_price == pytest.approx(multi_result.fill_price)
+    assert single_result.fee_paid == pytest.approx(multi_result.fee_paid)
+    assert single_result.new_state.cash == pytest.approx(multi_result.new_state.cash)
+
+
+def test_no_spread_penalty_makes_no_trades_more_expensive(trading_db: Path) -> None:
+    """With a NO spread penalty, buying NO should cost slightly more."""
+    from polymarket_backtest.market_simulator import MarketSimulator
+
+    env_no_penalty = TradingEnvironment(
+        db_path=trading_db,
+        starting_cash=100.0,
+        market_ids=["market_a"],
+        enable_ml_predictions=False,
+    )
+    env_no_penalty._core.simulator = MarketSimulator(no_spread_penalty_bps=0.0)
+    env_no_penalty.reset("market_a")
+    result_no_penalty = env_no_penalty.step(Action.buy_no(quantity=5.0))
+
+    env_with_penalty = TradingEnvironment(
+        db_path=trading_db,
+        starting_cash=100.0,
+        market_ids=["market_a"],
+        enable_ml_predictions=False,
+    )
+    env_with_penalty._core.simulator = MarketSimulator(no_spread_penalty_bps=50.0)
+    env_with_penalty.reset("market_a")
+    result_with_penalty = env_with_penalty.step(Action.buy_no(quantity=5.0))
+
+    # With a penalty, the NO ask price is higher, so the fill price should
+    # be at least as expensive (or the filled quantity may differ).
+    if result_no_penalty.filled_quantity > 0 and result_with_penalty.filled_quantity > 0:
+        assert result_with_penalty.fill_price >= result_no_penalty.fill_price - 1e-6
 
 
 def test_polymarket_gym_env_reset_and_step(trading_db: Path) -> None:

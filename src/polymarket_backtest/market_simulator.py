@@ -65,6 +65,11 @@ class MarketSimulator:
     passive_flow_capture_rate: float = 0.35
     empty_book_impact_multiplier: float = 2.5
     maker_rebate_eligible: bool = True
+    # Spread penalty applied to NO book prices (basis points).  The real NO
+    # order book typically has slightly different depth/spread than what we
+    # get from complement pricing (NO = 1 - YES).  This widens the
+    # simulated NO spread to be more conservative.  Set to 0 to disable.
+    no_spread_penalty_bps: float = 10.0
 
     def simulate(
         self,
@@ -144,6 +149,14 @@ class MarketSimulator:
         return self._complement_market(market)
 
     def _complement_market(self, market: MarketState) -> MarketState:
+        # Apply spread penalty: widen the NO book spread to simulate
+        # the fact that the real NO order book may be less liquid than
+        # what perfect complement pricing implies.
+        penalty = self.no_spread_penalty_bps / 10_000.0
+        raw_bid = 1.0 - market.best_ask
+        raw_ask = 1.0 - market.best_bid
+        no_bid = self._clamp_price(raw_bid - penalty)
+        no_ask = self._clamp_price(raw_ask + penalty)
         return MarketState(
             market_id=market.market_id,
             title=market.title,
@@ -151,8 +164,8 @@ class MarketSimulator:
             market_type=market.market_type,
             ts=market.ts,
             status=market.status,
-            best_bid=self._clamp_price(1.0 - market.best_ask),
-            best_ask=self._clamp_price(1.0 - market.best_bid),
+            best_bid=no_bid,
+            best_ask=no_ask,
             mid=self._clamp_price(1.0 - market.mid),
             last_trade=self._clamp_price(1.0 - market.last_trade),
             volume_1m=market.volume_1m,
@@ -169,7 +182,11 @@ class MarketSimulator:
             orderbook=[
                 OrderLevel(
                     side="ask" if level.side == "bid" else "bid",
-                    price=self._clamp_price(1.0 - level.price),
+                    price=self._clamp_price(
+                        (1.0 - level.price) - penalty
+                        if level.side == "ask"  # becomes bid -> lower
+                        else (1.0 - level.price) + penalty  # becomes ask -> higher
+                    ),
                     quantity=level.quantity,
                     level_no=level.level_no,
                 )
