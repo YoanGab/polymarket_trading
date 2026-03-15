@@ -17,6 +17,7 @@ from .market_categories import category_fee_settings, normalize_market_tags
 from .market_simulator import MarketSimulator
 from .ml_transport import MLModelTransport
 from .replay_engine import ReplayEngine, StrategyPortfolio
+from .splits import HOLDOUT_CUTOFF, TRAIN_CUTOFF, VAL_CUTOFF
 from .strategies import no_ask_price, no_bid_price, normalized_contract_price
 from .types import (
     FillResult,
@@ -29,8 +30,6 @@ from .types import (
     isoformat,
 )
 
-SPLIT_TRAIN_CUTOFF = "2025-10-01"
-SPLIT_VAL_CUTOFF = "2026-01-01"
 DEFAULT_FEATURE_LOOKBACK = 24
 DEFAULT_TOP_RELATED = 5
 MIN_CONTRACT_PRICE = 0.001
@@ -1106,19 +1105,25 @@ class TradingEnvironment:
         market = self._core._market_state_for_episode(self._episode)
         return self._core.portfolio_value(active_markets={self._episode.market_id: market})
 
-    def _market_ids_for_split(self, split: str) -> list[str]:
+    def _market_ids_for_split(self, split: str, *, allow_holdout: bool = False) -> list[str]:
+        if split == "holdout" and not allow_holdout:
+            raise ValueError("Holdout set is locked. Use --final-eval to unlock.")
+
         if split == "all":
             condition = ""
             params: tuple[str, ...] = ()
         elif split == "train":
             condition = "WHERE split_ts < ?"
-            params = (SPLIT_TRAIN_CUTOFF,)
+            params = (TRAIN_CUTOFF,)
         elif split == "val":
             condition = "WHERE split_ts >= ? AND split_ts < ?"
-            params = (SPLIT_TRAIN_CUTOFF, SPLIT_VAL_CUTOFF)
+            params = (TRAIN_CUTOFF, VAL_CUTOFF)
         elif split == "test":
+            condition = "WHERE split_ts >= ? AND split_ts < ?"
+            params = (VAL_CUTOFF, HOLDOUT_CUTOFF)
+        elif split == "holdout":
             condition = "WHERE split_ts >= ?"
-            params = (SPLIT_VAL_CUTOFF,)
+            params = (HOLDOUT_CUTOFF,)
         else:
             raise ValueError(f"Unknown split {split!r}")
 

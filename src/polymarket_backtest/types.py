@@ -72,6 +72,7 @@ class MarketState:
     fee_exponent: float
     maker_rebate_rate: float
     orderbook: list[OrderLevel]
+    scheduled_close_ts: datetime | None = None  # from endDateIso (known in advance)
     tags: list[str] = field(default_factory=list)
     outcome_count: int = 2
     outcome_tokens: list[str] = field(default_factory=list)
@@ -200,9 +201,7 @@ class StrategyConfig:
         if not (0.0 < self.max_portfolio_pct <= 1.0):
             raise ValueError(f"max_portfolio_pct must be in (0, 1], got {self.max_portfolio_pct}")
         if not (0.0 < self.max_total_invested_pct <= 1.0):
-            raise ValueError(
-                f"max_total_invested_pct must be in (0, 1], got {self.max_total_invested_pct}"
-            )
+            raise ValueError(f"max_total_invested_pct must be in (0, 1], got {self.max_total_invested_pct}")
         if self.mm_spread_bps <= 0:
             raise ValueError(f"mm_spread_bps must be > 0, got {self.mm_spread_bps}")
         if self.mm_max_inventory <= 0:

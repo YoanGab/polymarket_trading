@@ -32,6 +32,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE markets ADD COLUMN event_id TEXT")
         if "tags_json" not in market_columns:
             conn.execute("ALTER TABLE markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'")
+        if "scheduled_close_ts" not in market_columns:
+            conn.execute("ALTER TABLE markets ADD COLUMN scheduled_close_ts TEXT")
     conn.commit()
 
     schema = resources.files("polymarket_backtest").joinpath("schema.sql").read_text()

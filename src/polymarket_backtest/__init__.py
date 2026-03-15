@@ -1,4 +1,5 @@
 from .gym_env import PolymarketGymEnv
+from .production_guards import TradingGuards
 from .trading_env import (
     Action,
     MultiMarketEnvironment,
@@ -18,6 +19,7 @@ __all__ = [
     "PositionInfo",
     "RelatedMarketInfo",
     "StepResult",
+    "TradingGuards",
     "TradingEnvironment",
     "TradingState",
 ]

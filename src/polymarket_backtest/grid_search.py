@@ -20,7 +20,7 @@ from .market_categories import (
 )
 from .metrics import build_metrics_summary, persist_metric_results
 from .replay_engine import ReplayEngine
-from .splits import HOLDOUT_CUTOFF, TRAIN_CUTOFF, VAL_CUTOFF, get_split
+from .splits import HOLDOUT_CUTOFF, TRAIN_CUTOFF, VAL_CUTOFF
 from .types import ReplayConfig, StrategyConfig, dc_asdict
 
 DEFAULT_LOOKBACK_MINUTES = 240

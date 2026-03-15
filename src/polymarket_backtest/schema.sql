@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS markets (
     open_ts TEXT NOT NULL,
     close_ts TEXT,
     resolution_ts TEXT,
+    scheduled_close_ts TEXT,
     status TEXT NOT NULL,
     fees_enabled INTEGER NOT NULL DEFAULT 0,
     fee_rate REAL NOT NULL DEFAULT 0.0,

@@ -65,9 +65,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--split",
-        choices=["train", "val", "test"],
+        choices=["train", "val", "test", "holdout"],
         default="val",
-        help="Chronological split to evaluate on (default: val). Use 'val' for tuning, 'test' for final eval only.",
+        help=(
+            "Chronological split to evaluate on (default: val). "
+            "Use 'val' for tuning, 'test' for final eval only. "
+            "'holdout' requires --final-eval."
+        ),
+    )
+    parser.add_argument(
+        "--final-eval",
+        action="store_true",
+        default=False,
+        help="Unlock the holdout set for final evaluation. Required when --split=holdout.",
     )
     parser.add_argument(
         "--stride",
@@ -95,6 +105,10 @@ def main() -> None:
 
     transport_factory = _make_transport_factory(args.forecast_mode)
 
+    if args.split == "holdout" and not args.final_eval:
+        print("ERROR: Holdout set is locked. Use --final-eval to unlock.", file=sys.stderr)
+        sys.exit(1)
+
     start = time.monotonic()
     results = run_grid_search(
         DB_PATH,
@@ -107,6 +121,7 @@ def main() -> None:
         n_workers=args.workers,
         transport_mode=args.forecast_mode,
         seed=args.seed,
+        allow_holdout=args.final_eval,
     )
     ranked = rank_strategies(results)
     elapsed = time.monotonic() - start

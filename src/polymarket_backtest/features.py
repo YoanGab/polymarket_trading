@@ -279,7 +279,7 @@ def walk_forward_split(
     else:
         # Fallback: group by market_id, use last timestamp per market
         market_last_ts: dict[str, str] = {}
-        for mid, ts in zip(dataset.market_ids, dataset.timestamps):
+        for mid, ts in zip(dataset.market_ids, dataset.timestamps, strict=True):
             if mid not in market_last_ts or ts > market_last_ts[mid]:
                 market_last_ts[mid] = ts
         market_split = {}
@@ -307,7 +307,7 @@ def walk_forward_split(
         val_y=dataset.y[val_mask],
         test_X=dataset.X[test_mask],
         test_y=dataset.y[test_mask],
-        train_market_ids=[mid for mid, m in zip(dataset.market_ids, train_mask) if m],
-        val_market_ids=[mid for mid, m in zip(dataset.market_ids, val_mask) if m],
-        test_market_ids=[mid for mid, m in zip(dataset.market_ids, test_mask) if m],
+        train_market_ids=[mid for mid, m in zip(dataset.market_ids, train_mask, strict=True) if m],
+        val_market_ids=[mid for mid, m in zip(dataset.market_ids, val_mask, strict=True) if m],
+        test_market_ids=[mid for mid, m in zip(dataset.market_ids, test_mask, strict=True) if m],
     )
