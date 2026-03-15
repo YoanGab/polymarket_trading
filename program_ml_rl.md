@@ -23,7 +23,7 @@ Defined in `src/polymarket_backtest/splits.py`. Do NOT modify or bypass.
 
 1. Create branch `autotrader/<tag>` from current HEAD.
 2. Read this file and understand the environment.
-3. Verify: `uv run pytest tests/ -q` → 100 tests pass.
+3. Verify: `uv run pytest tests/ -q` → 122 tests pass.
 4. Verify data: `ls -la data/polymarket_backtest_v2.sqlite` (~19GB).
 5. Run baseline, record in results.tsv, and go.
 
@@ -50,7 +50,8 @@ The environment exposes **raw data** — the agent decides what features to extr
 
 - `scripts/train_rl.py` — RL training loop, algorithm, architecture, reward shaping
 - `scripts/train_model.py` — ML model, features, hyperparameters
-- `src/polymarket_backtest/gym_env.py` — observation space, action space, reward
+- `src/polymarket_backtest/gym_env.py` — single-market gym env (Discrete(12))
+- `src/polymarket_backtest/gym_env_multi.py` — multi-market gym env (N markets, shared cash, MultiDiscrete)
 - `src/polymarket_backtest/features.py` — feature extraction
 - `src/polymarket_backtest/ml_transport.py` — ML inference
 - `src/polymarket_backtest/strategies.py` — hand-crafted strategy logic
@@ -79,7 +80,7 @@ uv run python scripts/train_model.py --model xgboost > run.log 2>&1
 # (uses data/prepared/train.npz automatically)
 
 # 2. EVALUATE on val split (frozen model)
-uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 500 --split val > eval.log 2>&1
+uv run python scripts/eval_strategies.py --forecast-mode ml_model --max-markets 100 --split val > eval.log 2>&1
 
 # 3. Read metrics
 grep "RESULT\|TEST_BRIER" run.log
@@ -90,15 +91,21 @@ grep "BEST_STRATEGY\|SHARPE\|PNL\|TRADES" eval.log
 
 ```bash
 # 1. TRAIN on train markets (the agent plays and learns)
-uv run python scripts/train_rl.py --split train --episodes 1000 > run.log 2>&1
+uv run python scripts/train_rl.py --split train --episodes 500 > run.log 2>&1
 
 # 2. EVALUATE on val markets (frozen policy, no learning)
-uv run python scripts/train_rl.py --split val --episodes 200 --eval-only > eval.log 2>&1
+uv run python scripts/train_rl.py --split val --episodes 100 --eval-only > eval.log 2>&1
 
 # 3. Read metrics
 grep "RESULT\|EPISODE_RETURN\|SHARPE" run.log
 grep "EVAL\|SHARPE\|TRADES" eval.log
 ```
+
+**Two gym environments available** (you choose):
+- `PolymarketGymEnv` — single market per episode, Discrete(12) actions. Simple, good for starting.
+- `PolymarketMultiMarketGymEnv` — N markets simultaneous, shared cash, MultiDiscrete actions. More realistic, 1700 episodes/min after 96s init.
+
+The train_rl.py currently uses single-market. You can switch to multi-market if you think it's better.
 
 **The RL agent must train on train markets and be evaluated on val markets.** The `--split` flag controls which markets are used. `--eval-only` freezes the policy (no gradient updates).
 
