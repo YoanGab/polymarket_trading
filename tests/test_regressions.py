@@ -428,7 +428,10 @@ def test_market_simulator_passive_fill_earns_maker_rebate_by_default() -> None:
 
     assert len(fills) == 1
     assert fills[0].liquidity_role == "maker"
-    assert fills[0].rebate_usdc == pytest.approx(0.001)
+    # rebate = taker_fee_equivalent * maker_rebate_rate
+    # taker_fee_equivalent = 10 * 0.50 * 0.02 * (0.50*0.50)^1 = 0.025
+    # rebate = 0.025 * 0.01 = 0.00025 -> rounds to 0.0003
+    assert fills[0].rebate_usdc == pytest.approx(0.0003)
     assert fills[0].fee_usdc == pytest.approx(0.0)
 
 

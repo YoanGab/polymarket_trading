@@ -28,7 +28,7 @@ DEFAULT_MODEL_RELEASE = os.environ.get("GROK_MODEL_RELEASE", "grok-3")
 
 def expanded_strategy_grid() -> list[StrategyConfig]:
     """Category-routed strategy grid tuned to fee profile and time-to-resolution."""
-    fee_free_blocklist = list(FEE_BEARING_CATEGORY_TAGS)
+    fee_free_blocklist = list(dict.fromkeys([*CRYPTO_CATEGORY_TAGS, *SPORTS_CATEGORY_TAGS]))
     crypto_only = list(CRYPTO_CATEGORY_TAGS)
     sports_only = list(SPORTS_CATEGORY_TAGS)
 
