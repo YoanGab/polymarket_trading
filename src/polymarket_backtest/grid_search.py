@@ -33,16 +33,16 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
     sports_only = list(SPORTS_CATEGORY_TAGS)
 
     return [
-        # Fee-free political/event markets: wider horizons and larger sizing.
+        # Fee-free political/event markets: conservative sizing, require strong edge.
         StrategyConfig(
             name="political_event_wide",
             family="resolution_convergence",
-            kelly_fraction=0.40,
+            kelly_fraction=0.20,
             edge_threshold_bps=200.0,
-            max_position_notional=1500.0,
+            max_position_notional=800.0,
             max_holding_minutes=None,
             resolution_hours_max=2160.0,
-            min_confidence=0.65,
+            min_confidence=0.70,
             extreme_low=0.25,
             extreme_high=0.80,
             use_thesis_stop=True,
@@ -52,12 +52,12 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
         StrategyConfig(
             name="political_event_core",
             family="resolution_convergence",
-            kelly_fraction=0.80,
-            edge_threshold_bps=40.0,
-            max_position_notional=3000.0,
+            kelly_fraction=0.25,
+            edge_threshold_bps=150.0,
+            max_position_notional=1000.0,
             max_holding_minutes=None,
             resolution_hours_max=720.0,
-            min_confidence=0.65,
+            min_confidence=0.70,
             extreme_low=0.30,
             extreme_high=0.70,
             use_thesis_stop=True,
@@ -67,9 +67,9 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
         StrategyConfig(
             name="political_event_conviction",
             family="edge_based",
-            kelly_fraction=0.35,
+            kelly_fraction=0.20,
             edge_threshold_bps=250.0,
-            max_position_notional=1200.0,
+            max_position_notional=800.0,
             max_holding_minutes=20160,
             min_confidence=0.75,
             use_thesis_stop=True,
@@ -228,83 +228,24 @@ def _stratified_market_sample(
     elif split == "holdout":
         split_filter = f"AND m.resolution_ts >= '{HOLDOUT_CUTOFF}'"
 
-    # Two-phase approach to avoid GROUP BY on 68M rows (63s → <1s):
-    # Phase 1: Get candidate market_ids from small tables (markets + resolutions)
+    # Fast random sampling from candidate markets (no per-market snapshot queries)
     candidates = conn.execute(
         f"""
         SELECT m.market_id
         FROM markets m
         JOIN market_resolutions mr ON mr.market_id = m.market_id
         {("WHERE 1=1 " + split_filter) if split_filter else ""}
+        ORDER BY RANDOM()
+        LIMIT ?
         """,
+        (max_markets,),
     ).fetchall()
-    candidate_ids = [str(r["market_id"]) for r in candidates]
+    selected = [str(r["market_id"]) for r in candidates]
 
-    if not candidate_ids:
-        return []
-
-    # Phase 2: Get snapshot counts via indexed lookups (much faster than GROUP BY)
-    rows = []
-    for mid in candidate_ids:
-        row = conn.execute(
-            "SELECT COUNT(*) as cnt, MIN(ts) as first_ts, MAX(ts) as last_ts FROM market_snapshots WHERE market_id = ?",
-            (mid,),
-        ).fetchone()
-        cnt = int(row["cnt"])
-        if min_snapshots <= cnt <= max_snapshots:
-            rows.append({"market_id": mid, "cnt": cnt, "first_ts": row["first_ts"], "last_ts": row["last_ts"]})
-
-    if not rows:
-        return []
-
-    # Bucket by market duration
-    buckets: dict[str, list[str]] = {
-        "short": [],  # < 7 days
-        "medium": [],  # 7-30 days
-        "long": [],  # 30-90 days
-        "very_long": [],  # 90+ days
-    }
-    for row in rows:
-        market_id = str(row["market_id"])
-        cnt = int(row["cnt"])
-        # Approximate duration from snapshot count (hourly snapshots)
-        duration_days = cnt / 24.0
-        if duration_days < 7:
-            buckets["short"].append(market_id)
-        elif duration_days < 30:
-            buckets["medium"].append(market_id)
-        elif duration_days < 90:
-            buckets["long"].append(market_id)
-        else:
-            buckets["very_long"].append(market_id)
-
-    # Proportional allocation with minimum 1 per non-empty bucket
-    non_empty = {k: v for k, v in buckets.items() if v}
-    total_available = sum(len(v) for v in non_empty.values())
-    if total_available == 0:
+    if not selected:
         return []
 
     rng = random.Random(seed)
-    selected: list[str] = []
-    remaining = max_markets
-
-    for bucket_name, bucket_markets in non_empty.items():
-        proportion = len(bucket_markets) / total_available
-        n = max(1, int(proportion * max_markets))
-        n = min(n, len(bucket_markets), remaining)
-        if n <= 0:
-            continue
-        sample = rng.sample(bucket_markets, n)
-        selected.extend(sample)
-        remaining -= n
-
-    # Fill remaining slots from largest bucket
-    if remaining > 0:
-        largest = max(non_empty.values(), key=len)
-        available = [m for m in largest if m not in set(selected)]
-        extra = rng.sample(available, min(remaining, len(available)))
-        selected.extend(extra)
-
     rng.shuffle(selected)
     return selected
 
