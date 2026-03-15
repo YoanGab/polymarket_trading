@@ -25,7 +25,6 @@ from .types import (
     OrderIntent,
     PositionState,
     ReplayConfig,
-    dc_replace,
     ensure_utc,
     isoformat,
 )
@@ -33,6 +32,32 @@ from .types import (
 DEFAULT_FEATURE_LOOKBACK = 24
 DEFAULT_TOP_RELATED = 5
 MIN_CONTRACT_PRICE = 0.001
+
+
+@dataclass(frozen=True)
+class _MarketMeta:
+    """Static metadata for a market, loaded once and reused across all steps."""
+
+    market_id: str
+    title: str
+    domain: str
+    market_type: str
+    tags_json: str | None
+    resolution_ts: datetime | None
+    fees_enabled: bool
+    fee_rate: float
+    fee_exponent: float
+    maker_rebate_rate: float
+    rules_text: str
+    additional_context: str
+    outcome_count: int
+    outcome_tokens: list[str]
+    # Pre-computed from tags
+    normalized_tags: list[str]
+    fee_cfg_fees_enabled: bool
+    fee_cfg_fee_rate: float
+    fee_cfg_fee_exponent: float
+    fee_cfg_maker_rebate_rate: float
 
 
 @dataclass(frozen=True)
@@ -323,10 +348,17 @@ class _TradingCore:
         self._rng = random.Random(random_seed)
         self._resolution_cache: dict[str, Any] = {}
         self._ml_transport = self._load_ml_transport() if enable_ml_predictions else None
+        # Caches for fast MarketState construction (no DB per step)
+        self._market_meta_cache: dict[str, _MarketMeta] = {}
+        self._market_state_cache: dict[tuple[str, int], MarketState] = {}
 
     def reset_portfolio(self) -> None:
         self.portfolio = StrategyPortfolio(cash=self.starting_cash)
         self.pending_orders = {}
+
+    def clear_market_state_cache(self) -> None:
+        """Clear the per-step market state cache (call between episodes/resets)."""
+        self._market_state_cache.clear()
 
     def build_state(self, episode: _MarketEpisode) -> TradingState:
         market = self._market_state_for_episode(episode)
@@ -458,6 +490,31 @@ class _TradingCore:
         if episode.resolution_ts is not None and ensure_utc(settlement_ts) >= ensure_utc(episode.resolution_ts):
             episode.done = True
 
+    def step_episode_fast(self, episode: _MarketEpisode, action: Action) -> None:
+        """Execute action and advance without building state or computing value.
+
+        This is the fast path for the gym env which builds observations
+        externally. It skips the TradingState construction and portfolio_value
+        computation that step_episode does.
+        """
+        if episode.done:
+            return
+
+        current_market = self._market_state_for_episode(episode)
+        next_market = self._next_market_state_for_episode(episode)
+
+        fill_records, _extra_info = self._execute_single_action(
+            episode,
+            action,
+            current_market,
+            next_market,
+        )
+        fill_records.extend(
+            self._process_pending_orders(current_market, next_market, episode.market_id),
+        )
+
+        self._advance_episode(episode, current_market)
+
     def step_episode(self, episode: _MarketEpisode, action: Action) -> StepResult:
         if episode.done:
             raise RuntimeError(f"Episode for market {episode.market_id} is already done")
@@ -576,48 +633,146 @@ class _TradingCore:
         except FileNotFoundError:
             return None
 
-    def _market_state_for_episode(self, episode: _MarketEpisode) -> MarketState:
-        market = db.get_market_state_as_of(self.conn, episode.market_id, episode.current_ts)
-        if market is None:
-            raise ValueError(f"Missing market state for {episode.market_id} at {isoformat(episode.current_ts)}")
-        tags = normalize_market_tags(market.tags)
-        if tags:
-            fee_cfg = category_fee_settings(tags)
-            market = dc_replace(
-                market,
-                fees_enabled=fee_cfg.fees_enabled,
-                fee_rate=fee_cfg.fee_rate,
-                fee_exponent=fee_cfg.fee_exponent,
-                maker_rebate_rate=fee_cfg.maker_rebate_rate,
-                tags=tags,
-            )
+    def _load_market_meta(self, market_id: str) -> _MarketMeta:
+        """Load static market metadata once and cache it."""
+        if market_id in self._market_meta_cache:
+            return self._market_meta_cache[market_id]
+
+        row = self.conn.execute(
+            """
+            SELECT market_id, title, domain, market_type, tags_json,
+                   resolution_ts, fees_enabled, fee_rate, fee_exponent,
+                   maker_rebate_rate
+            FROM markets
+            WHERE market_id = ?
+            """,
+            (market_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Market {market_id!r} not found in markets table")
+
+        tags_json = row["tags_json"]
+        tags = db._parse_tags_json(tags_json)
+        normalized_tags = normalize_market_tags(tags)
+        if normalized_tags:
+            fee_cfg = category_fee_settings(normalized_tags)
+            cfg_fees_enabled = fee_cfg.fees_enabled
+            cfg_fee_rate = fee_cfg.fee_rate
+            cfg_fee_exponent = fee_cfg.fee_exponent
+            cfg_maker_rebate_rate = fee_cfg.maker_rebate_rate
+        else:
+            cfg_fees_enabled = bool(row["fees_enabled"])
+            cfg_fee_rate = float(row["fee_rate"])
+            cfg_fee_exponent = float(row["fee_exponent"])
+            cfg_maker_rebate_rate = float(row["maker_rebate_rate"])
+
+        resolution_ts = datetime.fromisoformat(str(row["resolution_ts"])) if row["resolution_ts"] is not None else None
+
+        # Load rules (latest revision, or empty)
+        rule_row = self.conn.execute(
+            """
+            SELECT rules_text, additional_context
+            FROM market_rule_revisions
+            WHERE market_id = ?
+            ORDER BY effective_ts DESC
+            LIMIT 1
+            """,
+            (market_id,),
+        ).fetchone()
+
+        event_outcome_tokens = db.get_event_outcome_tokens(self.conn, market_id)
+        outcome_tokens = event_outcome_tokens if len(event_outcome_tokens) > 1 else []
+
+        meta = _MarketMeta(
+            market_id=market_id,
+            title=str(row["title"]),
+            domain=str(row["domain"]),
+            market_type=str(row["market_type"]),
+            tags_json=tags_json,
+            resolution_ts=resolution_ts,
+            fees_enabled=bool(row["fees_enabled"]),
+            fee_rate=float(row["fee_rate"]),
+            fee_exponent=float(row["fee_exponent"]),
+            maker_rebate_rate=float(row["maker_rebate_rate"]),
+            rules_text=str(rule_row["rules_text"]) if rule_row else "",
+            additional_context=str(rule_row["additional_context"]) if rule_row else "",
+            outcome_count=len(outcome_tokens) if outcome_tokens else 2,
+            outcome_tokens=outcome_tokens,
+            normalized_tags=normalized_tags if normalized_tags else tags,
+            fee_cfg_fees_enabled=cfg_fees_enabled,
+            fee_cfg_fee_rate=cfg_fee_rate,
+            fee_cfg_fee_exponent=cfg_fee_exponent,
+            fee_cfg_maker_rebate_rate=cfg_maker_rebate_rate,
+        )
+        self._market_meta_cache[market_id] = meta
+        return meta
+
+    def _market_state_from_row(self, market_id: str, snapshot_row: Any) -> MarketState:
+        """Build a MarketState from an in-memory snapshot row + cached metadata.
+
+        This avoids all DB queries and is the fast path used by the gym env.
+        """
+        meta = self._load_market_meta(market_id)
+        market = MarketState(
+            market_id=meta.market_id,
+            title=meta.title,
+            domain=meta.domain,
+            market_type=meta.market_type,
+            ts=datetime.fromisoformat(str(snapshot_row["ts"])),
+            status=str(snapshot_row["status"]),
+            best_bid=float(snapshot_row["best_bid"]),
+            best_ask=float(snapshot_row["best_ask"]),
+            mid=float(snapshot_row["mid"]),
+            last_trade=float(snapshot_row["last_trade"]),
+            volume_1m=float(snapshot_row["volume_1m"]),
+            volume_24h=float(snapshot_row["volume_24h"]),
+            open_interest=float(snapshot_row["open_interest"]),
+            tick_size=float(snapshot_row["tick_size"]),
+            rules_text=meta.rules_text,
+            additional_context=meta.additional_context,
+            resolution_ts=meta.resolution_ts,
+            fees_enabled=meta.fee_cfg_fees_enabled,
+            fee_rate=meta.fee_cfg_fee_rate,
+            fee_exponent=meta.fee_cfg_fee_exponent,
+            maker_rebate_rate=meta.fee_cfg_maker_rebate_rate,
+            orderbook=[],  # Will be synthesized by _ensure_orderbook
+            tags=meta.normalized_tags if meta.normalized_tags else meta.normalized_tags,
+            outcome_count=meta.outcome_count,
+            outcome_tokens=meta.outcome_tokens,
+        )
         market = self.executor._normalize_quotes(market)
         return self.executor._ensure_orderbook(market, reason="trading_env")
+
+    _MARKET_STATE_CACHE_MAX = 10_000
+
+    def _market_state_for_episode(self, episode: _MarketEpisode) -> MarketState:
+        cache_key = (episode.market_id, episode.index)
+        cached = self._market_state_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        market = self._market_state_from_row(episode.market_id, episode.current_row)
+        if len(self._market_state_cache) >= self._MARKET_STATE_CACHE_MAX:
+            self._market_state_cache.clear()
+        self._market_state_cache[cache_key] = market
+        return market
 
     def _next_market_state_for_episode(self, episode: _MarketEpisode) -> MarketState | None:
         next_row = episode.next_row()
         if next_row is None:
             return None
-        next_market = db.get_market_state_as_of(
-            self.conn,
-            episode.market_id,
-            datetime.fromisoformat(str(next_row["ts"])),
-        )
-        if next_market is None:
-            return None
-        tags = normalize_market_tags(next_market.tags)
-        if tags:
-            fee_cfg = category_fee_settings(tags)
-            next_market = dc_replace(
-                next_market,
-                fees_enabled=fee_cfg.fees_enabled,
-                fee_rate=fee_cfg.fee_rate,
-                fee_exponent=fee_cfg.fee_exponent,
-                maker_rebate_rate=fee_cfg.maker_rebate_rate,
-                tags=tags,
-            )
-        next_market = self.executor._normalize_quotes(next_market)
-        return self.executor._ensure_orderbook(next_market, reason="trading_env_next")
+
+        next_index = episode.index + 1
+        cache_key = (episode.market_id, next_index)
+        cached = self._market_state_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        market = self._market_state_from_row(episode.market_id, next_row)
+        if len(self._market_state_cache) >= self._MARKET_STATE_CACHE_MAX:
+            self._market_state_cache.clear()
+        self._market_state_cache[cache_key] = market
+        return market
 
     def _feature_row(self, snapshot_row: Any, resolution_ts: datetime | None) -> _DictRow:
         keys = snapshot_row.keys()

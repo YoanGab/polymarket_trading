@@ -17,7 +17,7 @@ import numpy as np
 from gymnasium import spaces
 
 from . import db
-from .trading_env import Action, _MarketEpisode, _TradingCore
+from .trading_env import Action, _MarketEpisode, _position_key, _TradingCore
 from .types import MarketState, ensure_utc
 
 # Per-market feature count extracted from TradingState.to_array()
@@ -239,7 +239,7 @@ class PolymarketMultiMarketGymEnv(gym.Env[dict[str, np.ndarray], np.ndarray]):
                 continue
 
             act = _ACTION_MAP.get(int(action[slot_idx]), Action.hold())
-            self._core.step_episode(episode, act)
+            self._core.step_episode_fast(episode, act)
 
         # Handle resolved/done markets -- settle and replace
         self._handle_completed_markets()
@@ -296,8 +296,7 @@ class PolymarketMultiMarketGymEnv(gym.Env[dict[str, np.ndarray], np.ndarray]):
                 continue
 
             market_mask[slot_idx] = 1.0
-            state = self._core.build_state(episode)
-            market_features[slot_idx] = state.to_array()
+            market_features[slot_idx] = self._build_slot_features(episode)
 
         portfolio = self._build_portfolio_features()
 
@@ -307,6 +306,89 @@ class PolymarketMultiMarketGymEnv(gym.Env[dict[str, np.ndarray], np.ndarray]):
             "market_mask": market_mask,
             "ml_edges": self._ml_edges.copy(),
         }
+
+    def _build_slot_features(self, episode: _MarketEpisode) -> np.ndarray:
+        """Build the feature vector for a single slot directly, bypassing TradingState."""
+        market = self._core._market_state_for_episode(episode)
+        self._core._update_mark_for_market(market)
+        features = self._core._feature_dict(episode)
+
+        hours_to_resolution = 720.0
+        if market.seconds_to_resolution is not None:
+            hours_to_resolution = market.seconds_to_resolution / 3600.0
+
+        # Position info for this market only
+        yes_qty = 0.0
+        yes_pnl_pct = 0.0
+        no_qty = 0.0
+        no_pnl_pct = 0.0
+        total_invested = 0.0
+        total_unrealized_pnl = 0.0
+        n_open = 0
+
+        for position in self._core.portfolio.positions.values():
+            if position.quantity <= 0:
+                continue
+            n_open += 1
+            invested = position.quantity * position.avg_entry_price
+            total_invested += invested
+            key = _position_key(position.market_id, position.is_no_bet)
+            mark = self._core.portfolio.last_known_mids.get(key, position.avg_entry_price)
+            unrealized = (mark - position.avg_entry_price) * position.quantity
+            total_unrealized_pnl += unrealized
+            if position.market_id == episode.market_id:
+                pnl_pct = unrealized / max(invested, 1e-9)
+                if position.is_no_bet:
+                    no_qty = position.quantity
+                    no_pnl_pct = pnl_pct
+                else:
+                    yes_qty = position.quantity
+                    yes_pnl_pct = pnl_pct
+
+        cash = self._core.portfolio.cash
+        starting = max(self._core.starting_cash, 1.0)
+
+        def _v(value: float | None, scale: float = 1.0) -> float:
+            if value is None or not math.isfinite(value):
+                return 0.0
+            return float(value) / scale
+
+        return np.asarray(
+            [
+                _v(min(hours_to_resolution, 720.0), 720.0),
+                _v(market.best_bid),
+                _v(market.best_ask),
+                _v(market.mid),
+                _v(market.best_ask - market.best_bid, 0.25),
+                _v(min(market.volume_24h, 100_000.0), 100_000.0),
+                _v(features.get("momentum_3h", 0.0)),
+                _v(features.get("momentum_6h", 0.0)),
+                _v(features.get("momentum_12h", 0.0)),
+                _v(features.get("momentum_24h", 0.0)),
+                _v(features.get("volatility_24h", 0.0), 0.25),
+                _v(features.get("price_range_24h", 0.0)),
+                0.0,  # ml_probability_yes (disabled)
+                0.0,  # ml_confidence (disabled)
+                0.0,  # ml_edge_bps (disabled)
+                _v(cash, starting),
+                _v(cash / starting),
+                _v(total_invested, starting),
+                _v(total_unrealized_pnl, starting),
+                _v(n_open, 10.0),
+                _v(yes_qty, 100.0),
+                _v(yes_pnl_pct),
+                _v(no_qty, 100.0),
+                _v(no_pnl_pct),
+                0.0,  # related_markets count (0 in gym env)
+                0.0,
+                0.0,
+                0.0,  # related correlations
+                0.0,
+                0.0,
+                0.0,  # related mids
+            ],
+            dtype=np.float32,
+        )
 
     def _build_portfolio_features(self) -> np.ndarray:
         cash = self._core.portfolio.cash
