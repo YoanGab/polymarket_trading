@@ -361,9 +361,9 @@ def train_xgboost(
     model = xgb.train(
         params,
         dtrain,
-        num_boost_round=500,
+        num_boost_round=800,
         evals=[(dval, "val")],
-        early_stopping_rounds=50,
+        early_stopping_rounds=80,
         verbose_eval=False,
     )
 
