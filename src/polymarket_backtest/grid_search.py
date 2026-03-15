@@ -158,20 +158,18 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
         ),
-        # 9. High-odds core: tight high range, aggressive sizing
+        # 9. Edge-based high-edge: stricter filter for quality trades
         StrategyConfig(
-            name="highodds_core",
-            family="resolution_convergence",
-            kelly_fraction=0.50,
-            edge_threshold_bps=200.0,
-            max_position_notional=1500.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
+            name="edge_strict",
+            family="edge_based",
+            kelly_fraction=0.30,
+            edge_threshold_bps=800.0,
+            max_position_notional=1000.0,
+            max_holding_minutes=10080,
             min_confidence=0.65,
-            extreme_low=0.75,
-            extreme_high=0.92,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
+            aggressive_entry=True,
         ),
         # 10. High conviction: high confidence, wide range
         StrategyConfig(
