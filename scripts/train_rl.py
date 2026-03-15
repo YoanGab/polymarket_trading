@@ -29,6 +29,7 @@ logging.disable(logging.WARNING)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest_v2.sqlite"
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 
 ObsDict = dict[str, np.ndarray]
 _ACTION_TYPES_PER_SLOT = 5
@@ -273,6 +274,16 @@ def train(
 
         agent = DQNAgent(obs_dim=obs_dim, n_actions=n_actions)
 
+        # Load saved model if eval-only
+        policy_path = MODELS_DIR / "rl_dqn_policy.pt"
+        if eval_only and policy_path.exists():
+            import torch
+
+            checkpoint = torch.load(policy_path, weights_only=True)
+            agent.q_net.load_state_dict(checkpoint["q_net"])
+            agent.target_net.load_state_dict(checkpoint["target_net"])
+            print(f"Loaded policy from {policy_path}", flush=True)
+
         episode_returns: list[float] = []
         episode_trades: list[int] = []
         best_return = float("-inf")
@@ -356,11 +367,34 @@ def train(
             if timed_out:
                 break
 
+        # Save trained policy
+        if not eval_only:
+            import torch
+
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            policy_path = MODELS_DIR / "rl_dqn_policy.pt"
+            torch.save(
+                {
+                    "q_net": agent.q_net.state_dict(),
+                    "target_net": agent.target_net.state_dict(),
+                    "obs_dim": obs_dim,
+                    "n_actions": n_actions,
+                    "steps_done": agent.steps_done,
+                },
+                policy_path,
+            )
+            print(f"Saved policy to {policy_path}", flush=True)
+
         elapsed = time.monotonic() - start
         avg_return = float(np.mean(episode_returns)) if episode_returns else 0.0
         avg_trades = float(np.mean(episode_trades)) if episode_trades else 0.0
         win_rate = float(np.mean(np.asarray(episode_returns) > 0)) if episode_returns else 0.0
         best_return = 0.0 if best_return == float("-inf") else float(best_return)
+
+        # Compute Sharpe ratio from episode returns
+        returns_arr = np.asarray(episode_returns)
+        sharpe = float(np.mean(returns_arr) / max(np.std(returns_arr), 1e-8)) if len(returns_arr) > 1 else 0.0
+        total_pnl = float(np.sum(returns_arr))
 
         print(
             "RESULT"
@@ -368,6 +402,8 @@ def train(
             f"\tTRADES={avg_trades:.6f}"
             f"\tWIN_RATE={win_rate:.6f}"
             f"\tBEST_RETURN={best_return:.6f}"
+            f"\tSHARPE={sharpe:.6f}"
+            f"\tPNL={total_pnl:.2f}"
             f"\tTRAIN_TIME={elapsed:.2f}"
         )
     finally:
