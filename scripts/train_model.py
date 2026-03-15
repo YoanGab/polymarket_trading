@@ -372,7 +372,7 @@ def train_xgboost(
     # Isotonic calibration on held-out portion of training data
     from sklearn.isotonic import IsotonicRegression
 
-    cal_size = min(len(train_y) // 2, 1000000)
+    cal_size = min(len(train_y) // 10, 500000)
     rng = np.random.RandomState(42)
     cal_idx = rng.choice(len(train_y), cal_size, replace=False)
     cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
