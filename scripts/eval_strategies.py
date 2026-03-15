@@ -69,6 +69,12 @@ def main() -> None:
         default="val",
         help="Chronological split to evaluate on (default: val). Use 'val' for tuning, 'test' for final eval only.",
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=4,
+        help="Evaluate every Nth snapshot per market while preserving the last snapshot (default: 4).",
+    )
     args = parser.parse_args()
 
     if not DB_PATH.exists():
@@ -85,6 +91,7 @@ def main() -> None:
         exclude_categories=args.exclude_category,
         in_memory=not args.no_in_memory,
         split=args.split,
+        eval_stride=args.stride,
     )
     ranked = rank_strategies(results)
     elapsed = time.monotonic() - start

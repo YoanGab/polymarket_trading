@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import httpx
 
 from . import db
-from .types import ForecastInput, ForecastOutput, ensure_utc, isoformat
+from .types import ForecastInput, ForecastOutput, MarketState, ensure_utc, isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -466,43 +466,55 @@ class ReplayContextBuilder:
     conn: Any
     experiment_id: int | None
     lookback_minutes: int
+    skip_audit: bool = False
+    skip_related_markets: bool = False
 
-    def build(self, market_id: str, as_of: Any) -> ForecastInput:
-        market = db.get_market_state_as_of(self.conn, market_id, as_of)
-        if market is None:
-            raise ValueError(f"No market snapshot for {market_id} at {as_of}")
+    def build(
+        self,
+        market_id: str,
+        as_of: Any,
+        *,
+        market_state: MarketState | None = None,
+    ) -> ForecastInput:
+        if market_state is not None:
+            market = market_state
+        else:
+            market = db.get_market_state_as_of(self.conn, market_id, as_of)
+            if market is None:
+                raise ValueError(f"No market snapshot for {market_id} at {as_of}")
         news = db.get_market_news_as_of(self.conn, market_id, as_of, self.lookback_minutes)
-        related = db.get_related_markets_as_of(self.conn, market_id, as_of)
+        related = [] if self.skip_related_markets else db.get_related_markets_as_of(self.conn, market_id, as_of)
 
-        db.record_audit(
-            self.conn,
-            experiment_id=self.experiment_id,
-            market_id=market_id,
-            ts=ensure_utc(as_of),
-            tool_name="get_market_state_as_of",
-            request_max_ts=ensure_utc(as_of),
-            result_max_ts=market.ts,
-            row_count=1,
-            request_json={"market_id": market_id, "as_of": isoformat(as_of)},
-            response_payload={"market_id": market.market_id, "snapshot_ts": isoformat(market.ts)},
-        )
-        latest_news_ts = max((item.ingested_ts for item in news), default=ensure_utc(as_of))
-        db.record_audit(
-            self.conn,
-            experiment_id=self.experiment_id,
-            market_id=market_id,
-            ts=ensure_utc(as_of),
-            tool_name="get_market_news_as_of",
-            request_max_ts=ensure_utc(as_of),
-            result_max_ts=min(latest_news_ts, ensure_utc(as_of)),
-            row_count=len(news),
-            request_json={
-                "market_id": market_id,
-                "as_of": isoformat(as_of),
-                "lookback_minutes": self.lookback_minutes,
-            },
-            response_payload=[item.document_id for item in news],
-        )
+        if not self.skip_audit:
+            db.record_audit(
+                self.conn,
+                experiment_id=self.experiment_id,
+                market_id=market_id,
+                ts=ensure_utc(as_of),
+                tool_name="get_market_state_as_of",
+                request_max_ts=ensure_utc(as_of),
+                result_max_ts=market.ts,
+                row_count=1,
+                request_json={"market_id": market_id, "as_of": isoformat(as_of)},
+                response_payload={"market_id": market.market_id, "snapshot_ts": isoformat(market.ts)},
+            )
+            latest_news_ts = max((item.ingested_ts for item in news), default=ensure_utc(as_of))
+            db.record_audit(
+                self.conn,
+                experiment_id=self.experiment_id,
+                market_id=market_id,
+                ts=ensure_utc(as_of),
+                tool_name="get_market_news_as_of",
+                request_max_ts=ensure_utc(as_of),
+                result_max_ts=min(latest_news_ts, ensure_utc(as_of)),
+                row_count=len(news),
+                request_json={
+                    "market_id": market_id,
+                    "as_of": isoformat(as_of),
+                    "lookback_minutes": self.lookback_minutes,
+                },
+                response_payload=[item.document_id for item in news],
+            )
         return ForecastInput(
             as_of=ensure_utc(as_of),
             market=market,
@@ -570,8 +582,14 @@ class ReplayGrokClient:
             "related_markets": context.related_markets,
         }
 
-    def forecast(self, market_id: str, as_of: Any) -> tuple[ForecastOutput, str, str]:
-        context = self.context_builder.build(market_id, as_of)
+    def forecast(
+        self,
+        market_id: str,
+        as_of: Any,
+        *,
+        market_state: MarketState | None = None,
+    ) -> tuple[ForecastOutput, str, str]:
+        context = self.context_builder.build(market_id, as_of, market_state=market_state)
         context_bundle = self._bundle(context)
         system_prompt = build_temporal_system_prompt(context_bundle["as_of"])
         prompt_hash = stable_hash(system_prompt)

@@ -52,6 +52,8 @@ class ReplayEngine:
         }
         self.strategy_engine = StrategyEngine()
         self._resolution_cache: dict[str, sqlite3.Row | None] = {}
+        self._market_cache: dict[tuple[str, str], MarketState] = {}
+        self._next_ts_cache: dict[tuple[str, str], tuple[str, str] | None] = {}
         self.experiment_id = self.grok.experiment_id
         if self.experiment_id is None:
             raise ValueError("ReplayEngine requires grok.experiment_id")
@@ -74,6 +76,7 @@ class ReplayEngine:
             self._persist_positions()
             return self.experiment_id
 
+        self._preload_market_data(timelines)
         self._warm_resolution_cache(list(timelines))
 
         total_events = sum(len(timestamps) for timestamps in timelines.values())
@@ -146,6 +149,14 @@ class ReplayEngine:
             if missing_market_ids:
                 logger.warning("Requested markets missing snapshots: %s", ", ".join(missing_market_ids))
 
+        if self.config.eval_stride > 1:
+            for market_id in timelines:
+                ts_list = timelines[market_id]
+                strided = ts_list[:: self.config.eval_stride]
+                if strided[-1] != ts_list[-1]:
+                    strided.append(ts_list[-1])
+                timelines[market_id] = strided
+
         return timelines
 
     def _iter_market_events(self, timelines: dict[str, list[datetime]]) -> Iterator[tuple[str, datetime]]:
@@ -166,10 +177,152 @@ class ReplayEngine:
         for market_id in market_ids:
             self._get_resolution(market_id)
 
+    def _preload_market_data(self, timelines: dict[str, list[datetime]]) -> None:
+        """Batch-load market snapshots for timeline timestamps into memory."""
+        self._market_cache = {}
+        self._next_ts_cache = {}
+        all_market_ids = list(timelines.keys())
+        if not all_market_ids:
+            return
+
+        # Build next-timestamp cache from timelines (cheap, in-memory)
+        for market_id, timestamps in timelines.items():
+            for i, ts in enumerate(timestamps):
+                ts_key = isoformat(ts)
+                if i + 1 < len(timestamps):
+                    next_ts = timestamps[i + 1]
+                    self._next_ts_cache[(market_id, ts_key)] = (market_id, isoformat(next_ts))
+                else:
+                    self._next_ts_cache[(market_id, ts_key)] = None
+
+        # Batch load market metadata (one row per market — fast)
+        placeholders = ", ".join("?" for _ in all_market_ids)
+        market_meta: dict[str, Any] = {}
+        meta_rows = self.conn.execute(
+            f"""
+            SELECT market_id, title, domain, market_type, resolution_ts,
+                   fees_enabled, fee_rate, fee_exponent, maker_rebate_rate
+            FROM markets
+            WHERE market_id IN ({placeholders})
+            """,
+            tuple(all_market_ids),
+        ).fetchall()
+        for mr in meta_rows:
+            market_meta[str(mr["market_id"])] = mr
+
+        # Batch load rule revisions (latest per market)
+        rules_by_market: dict[str, tuple[str, str]] = {}
+        rule_rows = self.conn.execute(
+            f"""
+            SELECT market_id, rules_text, additional_context, effective_ts
+            FROM market_rule_revisions
+            WHERE market_id IN ({placeholders})
+            ORDER BY market_id, effective_ts DESC
+            """,
+            tuple(all_market_ids),
+        ).fetchall()
+        for rr in rule_rows:
+            mid = str(rr["market_id"])
+            if mid not in rules_by_market:
+                rules_by_market[mid] = (str(rr["rules_text"]), str(rr["additional_context"]))
+
+        # Build (market_id, ts) pairs to load — only timestamps in timelines
+        ts_pairs: list[tuple[str, str]] = []
+        for market_id, timestamps in timelines.items():
+            for ts in timestamps:
+                ts_pairs.append((market_id, isoformat(ts)))
+
+        # Load snapshots in chunks using exact (market_id, ts) matching
+        chunk_size = 500
+        for chunk_start in range(0, len(ts_pairs), chunk_size):
+            chunk = ts_pairs[chunk_start : chunk_start + chunk_size]
+            # Use a VALUES-based approach for exact lookups
+            conditions = " OR ".join("(s.market_id = ? AND s.ts = ?)" for _ in chunk)
+            params: list[str] = []
+            for mid, ts_str in chunk:
+                params.extend([mid, ts_str])
+            rows = self.conn.execute(
+                f"""
+                SELECT s.market_id, s.ts, s.status, s.best_bid, s.best_ask,
+                       s.mid, s.last_trade, s.volume_1m, s.volume_24h,
+                       s.open_interest, s.tick_size
+                FROM market_snapshots s
+                WHERE {conditions}
+                """,
+                tuple(params),
+            ).fetchall()
+
+            for row in rows:
+                market_id = str(row["market_id"])
+                ts = datetime.fromisoformat(str(row["ts"]))
+                ts_str = isoformat(ts)
+                meta = market_meta.get(market_id)
+                rules = rules_by_market.get(market_id, ("", ""))
+
+                if meta is None:
+                    continue
+
+                state = MarketState(
+                    market_id=market_id,
+                    title=str(meta["title"]),
+                    domain=str(meta["domain"]),
+                    market_type=str(meta["market_type"]),
+                    ts=ts,
+                    status=str(row["status"]),
+                    best_bid=float(row["best_bid"]),
+                    best_ask=float(row["best_ask"]),
+                    mid=float(row["mid"]),
+                    last_trade=float(row["last_trade"]),
+                    volume_1m=float(row["volume_1m"]),
+                    volume_24h=float(row["volume_24h"]),
+                    open_interest=float(row["open_interest"]),
+                    tick_size=float(row["tick_size"]),
+                    rules_text=rules[0],
+                    additional_context=rules[1],
+                    resolution_ts=(
+                        datetime.fromisoformat(str(meta["resolution_ts"])) if meta["resolution_ts"] else None
+                    ),
+                    fees_enabled=bool(meta["fees_enabled"]),
+                    fee_rate=float(meta["fee_rate"]),
+                    fee_exponent=float(meta["fee_exponent"]),
+                    maker_rebate_rate=float(meta["maker_rebate_rate"]),
+                    orderbook=[],
+                )
+                self._market_cache[(market_id, ts_str)] = state
+
+        logger.info(
+            "Preloaded %d market states for %d markets",
+            len(self._market_cache),
+            len(all_market_ids),
+        )
+
     def _get_resolution(self, market_id: str) -> sqlite3.Row | None:
         if market_id not in self._resolution_cache:
             self._resolution_cache[market_id] = db.get_resolution(self.conn, market_id)
         return self._resolution_cache[market_id]
+
+    def _get_cached_market(self, market_id: str, timestamp: datetime) -> MarketState | None:
+        """Look up a market state from cache, falling back to DB if needed."""
+        ts_key = isoformat(timestamp)
+        cached = self._market_cache.get((market_id, ts_key))
+        if cached is not None:
+            return cached
+        return db.get_market_state_as_of(self.conn, market_id, timestamp)
+
+    def _get_cached_next_market(self, market_id: str, timestamp: datetime) -> MarketState | None:
+        """Look up the next market state from cache, falling back to DB if needed."""
+        ts_key = isoformat(timestamp)
+        next_info = self._next_ts_cache.get((market_id, ts_key))
+        if next_info is not None:
+            next_market_id, next_ts_str = next_info
+            cached = self._market_cache.get((next_market_id, next_ts_str))
+            if cached is not None:
+                return cached
+        # Cache miss or not in next_ts_cache — fall back to DB
+        if (market_id, ts_key) in self._next_ts_cache and next_info is None:
+            # Explicitly known to have no next snapshot
+            return None
+        return db.get_next_market_state(self.conn, market_id, timestamp)
 
     def _process_market_snapshot(self, market_id: str, timestamp: datetime) -> None:
         if self._is_market_resolved_as_of(market_id, timestamp):
@@ -180,7 +333,7 @@ class ReplayEngine:
             )
             return
 
-        market = db.get_market_state_as_of(self.conn, market_id, timestamp)
+        market = self._get_cached_market(market_id, timestamp)
         if market is None:
             logger.warning(
                 "Missing market state for market_id=%s at ts=%s",
@@ -193,7 +346,7 @@ class ReplayEngine:
         market = self._ensure_orderbook(market, reason="current_snapshot")
 
         try:
-            forecast, prompt_hash, context_hash = self.grok.forecast(market_id, timestamp)
+            forecast, prompt_hash, context_hash = self.grok.forecast(market_id, timestamp, market_state=market)
         except Exception:
             logger.exception(
                 "Forecast failed for market_id=%s at ts=%s",
@@ -204,7 +357,7 @@ class ReplayEngine:
 
         self._persist_model_output(forecast, prompt_hash, context_hash)
 
-        next_market = db.get_next_market_state(self.conn, market_id, timestamp)
+        next_market = self._get_cached_next_market(market_id, timestamp)
         if next_market is not None:
             next_market = self._normalize_quotes(next_market)
             next_market = self._ensure_orderbook(next_market, reason="next_snapshot")

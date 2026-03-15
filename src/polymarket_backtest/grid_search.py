@@ -344,6 +344,7 @@ def run_grid_search(
     in_memory: bool = True,
     exclude_categories: list[str] | None = None,
     split: str | None = None,
+    eval_stride: int = 4,
 ) -> list[dict[str, Any]]:
     """Run a grid search across strategies.
 
@@ -409,6 +410,8 @@ def run_grid_search(
             starting_cash=starting_cash,
             transport_factory=transport_factory,
             market_ids=market_ids,
+            eval_stride=eval_stride,
+            skip_audit=True,
         )
         results: list[dict[str, Any]] = []
         for strategy in selected_strategies:
@@ -589,6 +592,8 @@ def _normalize_metric(results: list[dict[str, Any]], key: str) -> dict[str, floa
 def _run_all_strategies_experiment(
     conn: sqlite3.Connection,
     *,
+    eval_stride: int = 1,
+    skip_audit: bool = False,
     strategies: list[StrategyConfig],
     starting_cash: float,
     transport_factory: Callable[[], ForecastTransport] | None = None,
@@ -605,6 +610,7 @@ def _run_all_strategies_experiment(
         experiment_name=_build_experiment_name("grid_all"),
         starting_cash=starting_cash,
         lookback_minutes=DEFAULT_LOOKBACK_MINUTES,
+        eval_stride=eval_stride,
     )
     transport = transport_factory() if transport_factory is not None else DeterministicReplayTransport(model_id="grok")
     model_id = getattr(transport, "model_id", "grok")
@@ -628,12 +634,14 @@ def _run_all_strategies_experiment(
             "starting_cash": config.starting_cash,
             "lookback_minutes": config.lookback_minutes,
             "markout_horizons_min": config.markout_horizons_min,
+            "eval_stride": config.eval_stride,
             "grid_search": True,
             "strategies": [dc_asdict(s) for s in strategies],
         },
     )
     grok.experiment_id = experiment_id
     grok.context_builder.experiment_id = experiment_id
+    grok.context_builder.skip_audit = skip_audit
 
     engine = ReplayEngine(
         conn=conn,

@@ -233,3 +233,4 @@ class ReplayConfig:
     starting_cash: float
     lookback_minutes: int
     markout_horizons_min: tuple[int, ...] = (1, 5, 30, 240)
+    eval_stride: int = 1
