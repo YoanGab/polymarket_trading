@@ -355,7 +355,6 @@ def train_xgboost(
         "colsample_bytree": 0.3,
         "reg_alpha": 8.0,
         "reg_lambda": 25.0,
-        "scale_pos_weight": 4.5,  # ~(1-0.18)/0.18 to balance 18% positive class
         "seed": 42,
     }
 
