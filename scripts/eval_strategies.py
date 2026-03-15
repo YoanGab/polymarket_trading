@@ -81,6 +81,12 @@ def main() -> None:
         default=1,
         help="Number of parallel worker processes. 0 = auto (cpu_count), 1 = sequential (default).",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for stratified market sampling (default: 42).",
+    )
     args = parser.parse_args()
 
     if not DB_PATH.exists():
@@ -100,6 +106,7 @@ def main() -> None:
         eval_stride=args.stride,
         n_workers=args.workers,
         transport_mode=args.forecast_mode,
+        seed=args.seed,
     )
     ranked = rank_strategies(results)
     elapsed = time.monotonic() - start

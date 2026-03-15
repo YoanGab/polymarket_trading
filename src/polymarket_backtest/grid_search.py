@@ -355,6 +355,7 @@ def run_grid_search(
     eval_stride: int = 4,
     n_workers: int = 1,
     transport_mode: str | None = None,
+    seed: int = 42,
 ) -> list[dict[str, Any]]:
     """Run a grid search across strategies.
 
@@ -388,7 +389,7 @@ def run_grid_search(
         # Determine which market IDs to replay (stratified random sampling)
         market_ids: list[str] | None = None
         if max_markets is not None:
-            market_ids = _stratified_market_sample(conn, max_markets, split=split)
+            market_ids = _stratified_market_sample(conn, max_markets, split=split, seed=seed)
             if not market_ids:
                 raise ValueError(f"No market data found in {db_path}")
 
