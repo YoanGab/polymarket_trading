@@ -352,7 +352,7 @@ def train_xgboost(
         "max_depth": 0,  # unlimited depth for lossguide
         "max_leaves": 256,
         "grow_policy": "lossguide",
-        "min_child_weight": 200,
+        "min_child_weight": 100,
         "subsample": 0.5,
         "colsample_bytree": 0.3,
         "reg_alpha": 8.0,
