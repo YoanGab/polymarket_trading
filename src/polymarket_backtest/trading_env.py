@@ -579,6 +579,7 @@ class _TradingCore:
                     "volume_24h": market.volume_24h,
                     "open_interest": market.open_interest,
                     "resolution_ts": (isoformat(market.resolution_ts) if market.resolution_ts is not None else None),
+                    "tags": list(market.tags),
                 },
                 "prev_snapshots": prev_snapshots,
             },

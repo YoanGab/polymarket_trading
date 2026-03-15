@@ -568,6 +568,7 @@ class ReplayGrokClient:
                 "resolution_ts": isoformat(res_ts) if (res_ts := market.resolution_ts) is not None else None,
                 "outcome_count": market.outcome_count,
                 "outcome_tokens": list(market.outcome_tokens),
+                "tags": list(market.tags),
             },
             "recent_news": [
                 {

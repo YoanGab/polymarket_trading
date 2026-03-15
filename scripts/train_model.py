@@ -1082,8 +1082,9 @@ def main() -> None:
     # Drop features unavailable at inference.
     # ml_transport.py now passes prev_snapshots from context_bundle,
     # so momentum/volatility features ARE available at inference.
-    # Still exclude: best_bid, best_ask, last_trade (copied to output),
-    # tag features (not in context_bundle), n_tags.
+    # Still exclude: best_bid, best_ask, last_trade (copied to output).
+    # Tag features and n_tags ARE available — market.tags is populated
+    # during replay and passed through the context_bundle.
     INFERENCE_AVAILABLE = {
         "mid",
         "spread",
@@ -1114,7 +1115,11 @@ def main() -> None:
         "volatility_24h",
         "volume_trend",
         "price_range_24h",
+        # Tag features — available via market.tags in context_bundle
+        "n_tags",
     }
+    # Also include all tag_* features (dynamic names from meta.json top_tags)
+    INFERENCE_AVAILABLE |= {name for name in feature_names if name.startswith("tag_")}
     keep_idx = [i for i, name in enumerate(feature_names) if name in INFERENCE_AVAILABLE]
     dropped = [name for name in feature_names if name not in INFERENCE_AVAILABLE]
     feature_names = [feature_names[i] for i in keep_idx]

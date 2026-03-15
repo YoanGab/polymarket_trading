@@ -58,6 +58,15 @@ class MLModelTransport:
         prev_rows = [_market_to_row(snapshot) for snapshot in prev_snapshots]
         features = extract_snapshot_features(row, prev_rows)
 
+        # Add tag features from context_bundle
+        market_tags = set(market.get("tags", []))
+        for name in self._feature_names:
+            if name.startswith("tag_"):
+                tag = name[4:]  # remove "tag_" prefix
+                features[name] = 1.0 if tag in market_tags else 0.0
+        if "n_tags" in self._feature_names:
+            features["n_tags"] = float(len(market_tags))
+
         # Create feature vector in correct order
         feature_vector = np.array(
             [[features.get(name, 0.0) for name in self._feature_names]],

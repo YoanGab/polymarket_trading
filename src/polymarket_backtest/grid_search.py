@@ -14,7 +14,6 @@ from .grok_replay import (
 )
 from .market_categories import (
     CRYPTO_CATEGORY_TAGS,
-    FEE_BEARING_CATEGORY_TAGS,
     SPORTS_CATEGORY_TAGS,
     normalize_market_tags,
 )
