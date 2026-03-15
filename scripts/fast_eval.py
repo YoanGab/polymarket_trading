@@ -46,6 +46,8 @@ def predict_model(model: object, X: np.ndarray) -> np.ndarray:
         raw = model["xgb_model"].predict(dmat)
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
+        if "platt" in model:
+            raw = model["platt"].predict_proba(raw.reshape(-1, 1))[:, 1]
         return np.clip(raw, 0.001, 0.999)
     if isinstance(model, dict) and "ensemble" in model:
         preds = [predict_model(m, X) * w for m, w in zip(model["ensemble"], model["weights"])]

@@ -367,15 +367,21 @@ def train_xgboost(
         verbose_eval=False,
     )
 
-    # Isotonic calibration on validation set
-    from sklearn.isotonic import IsotonicRegression
+    # Platt scaling calibration on held-out portion of training data
+    from sklearn.linear_model import LogisticRegression as _LR
 
-    raw_val_preds = model.predict(dval)
-    calibrator = IsotonicRegression(y_min=0.001, y_max=0.999, out_of_bounds="clip")
-    calibrator.fit(raw_val_preds, val_y)
-    print(f"  XGBoost: applied isotonic calibration on {len(val_y)} val samples")
+    # Use a random 10% of training data for calibration (avoid overfitting on val)
+    cal_size = min(len(train_y) // 10, 500000)
+    rng = np.random.RandomState(42)
+    cal_idx = rng.choice(len(train_y), cal_size, replace=False)
+    cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
+    cal_labels = train_y[cal_idx]
 
-    return {"xgb_model": model, "scaler": scaler, "calibrator": calibrator}
+    platt = _LR(C=1e6, max_iter=100, solver="lbfgs")
+    platt.fit(cal_preds.reshape(-1, 1), cal_labels)
+    print(f"  XGBoost: Platt scaling on {cal_size} calibration samples")
+
+    return {"xgb_model": model, "scaler": scaler, "platt": platt}
 
 
 def train_catboost(
@@ -985,6 +991,8 @@ def predict(model: object, X: np.ndarray) -> np.ndarray:
         raw = model["xgb_model"].predict(dmat)
         if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
+        if "platt" in model:
+            raw = model["platt"].predict_proba(raw.reshape(-1, 1))[:, 1]
         return np.clip(raw, 0.001, 0.999)
     if isinstance(model, dict) and "catboost" in model:
         raw = model["catboost"].predict_proba(X)[:, 1]
