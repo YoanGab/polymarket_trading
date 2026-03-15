@@ -94,6 +94,7 @@ class ForecastInput:
     market: MarketState
     recent_news: list[NewsItem]
     related_markets: list[dict[str, Any]]
+    prev_snapshots: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,10 @@ class StrategyConfig:
     momentum_min_edge_bps: float = 50.0
     # Carry exit: threshold below which mid triggers a sell
     carry_exit_threshold: float = 0.05
+    # Generic exit: take profit after realizing this share of the max possible gain
+    profit_target_pct: float = 0.0
+    # Generic exit: close positions older than this many hours
+    time_exit_hours: float = 0.0
 
     def __post_init__(self) -> None:
         if not (0.0 < self.kelly_fraction <= 1.0):
@@ -159,6 +164,10 @@ class StrategyConfig:
             raise ValueError(f"edge_threshold_bps must be >= 0, got {self.edge_threshold_bps}")
         if self.max_position_notional <= 0:
             raise ValueError(f"max_position_notional must be > 0, got {self.max_position_notional}")
+        if self.profit_target_pct < 0:
+            raise ValueError(f"profit_target_pct must be >= 0, got {self.profit_target_pct}")
+        if self.time_exit_hours < 0:
+            raise ValueError(f"time_exit_hours must be >= 0, got {self.time_exit_hours}")
         if self.carry_price_min >= self.carry_price_max:
             raise ValueError(
                 f"carry_price_min ({self.carry_price_min}) must be < carry_price_max ({self.carry_price_max})"
@@ -180,6 +189,7 @@ class OrderIntent:
     edge_bps: float
     holding_period_minutes: int | None
     thesis: str
+    is_no_bet: bool = False
 
     def __post_init__(self) -> None:
         if not (0.001 <= self.limit_price <= 0.999):
@@ -220,6 +230,7 @@ class PositionState:
     realized_pnl_pre_resolution: float = 0.0
     fees_paid: float = 0.0
     rebates_earned: float = 0.0
+    is_no_bet: bool = False
 
     def age(self, as_of: datetime) -> timedelta | None:
         if self.opened_ts is None:

@@ -54,7 +54,9 @@ class MLModelTransport:
 
         # Build a fake sqlite3.Row-like dict for feature extraction
         row = _market_to_row(market, as_of=as_of)
-        features = extract_snapshot_features(row, prev_rows=[])
+        prev_snapshots = context_bundle.get("prev_snapshots", [])
+        prev_rows = [_market_to_row(snapshot) for snapshot in prev_snapshots]
+        features = extract_snapshot_features(row, prev_rows)
 
         # Create feature vector in correct order
         feature_vector = np.array(

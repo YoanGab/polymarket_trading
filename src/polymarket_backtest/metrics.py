@@ -6,7 +6,7 @@ import math
 import random
 import sqlite3
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from statistics import mean, stdev
 from typing import Any
 
@@ -423,7 +423,10 @@ def compute_trade_pnl_details(conn: sqlite3.Connection, experiment_id: int) -> l
     return results
 
 
-def compute_sharpe_like(conn: sqlite3.Connection, experiment_id: int) -> list[dict[str, Any]]:
+def _load_strategy_equity_marks(
+    conn: sqlite3.Connection,
+    experiment_id: int,
+) -> dict[str, list[tuple[datetime, float, bool]]]:
     rows = _rows(
         conn,
         """
@@ -460,7 +463,36 @@ def compute_sharpe_like(conn: sqlite3.Connection, experiment_id: int) -> list[di
                 current_has_active_position,
             )
         )
+    return equity_by_strategy
 
+
+def _period_bucket(ts: datetime, period: str) -> tuple[str, str, str]:
+    if period == "week":
+        iso_year, iso_week, _ = ts.isocalendar()
+        period_start = date.fromisocalendar(iso_year, iso_week, 1)
+        period_end = date.fromisocalendar(iso_year, iso_week, 7)
+        return (
+            f"{iso_year}-W{iso_week:02d}",
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
+    if period == "month":
+        period_start = date(ts.year, ts.month, 1)
+        if ts.month == 12:
+            next_month = date(ts.year + 1, 1, 1)
+        else:
+            next_month = date(ts.year, ts.month + 1, 1)
+        period_end = next_month - timedelta(days=1)
+        return (
+            f"{ts.year}-{ts.month:02d}",
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
+    raise ValueError(f"Unsupported period '{period}'. Expected 'week' or 'month'.")
+
+
+def compute_sharpe_like(conn: sqlite3.Connection, experiment_id: int) -> list[dict[str, Any]]:
+    equity_by_strategy = _load_strategy_equity_marks(conn, experiment_id)
     results = []
     for strategy, ts_equity_values in sorted(equity_by_strategy.items()):
         daily_equity: dict[str, float] = {}
@@ -469,7 +501,7 @@ def compute_sharpe_like(conn: sqlite3.Connection, experiment_id: int) -> list[di
                 continue
             daily_equity[ts.date().isoformat()] = equity
 
-        if len(daily_equity) < 10:
+        if len(daily_equity) < 30:
             sharpe = 0.0
         else:
             equity_values = list(daily_equity.values())
@@ -484,6 +516,73 @@ def compute_sharpe_like(conn: sqlite3.Connection, experiment_id: int) -> list[di
                 std_return = stdev(daily_returns)
                 sharpe = (_mean(daily_returns) / std_return) * math.sqrt(365.0) if std_return > 0 else 0.0
         results.append({"strategy_name": strategy, "sharpe_like": round(sharpe, 6)})
+    return results
+
+
+def compute_periodic_performance(
+    conn: sqlite3.Connection,
+    experiment_id: int,
+    period: str = "week",
+) -> list[dict[str, Any]]:
+    """Compute PnL breakdown by week or month."""
+    equity_by_strategy = _load_strategy_equity_marks(conn, experiment_id)
+    if not equity_by_strategy:
+        return []
+
+    trade_counts: dict[tuple[str, str], int] = defaultdict(int)
+    seen_orders: set[tuple[str, str, str]] = set()
+    for row in _rows(
+        conn,
+        """
+        SELECT strategy_name, fill_ts, order_id
+        FROM fills
+        WHERE experiment_id = ?
+        ORDER BY strategy_name, fill_ts, order_id
+        """,
+        (experiment_id,),
+    ):
+        strategy_name = str(row["strategy_name"])
+        period_label, _, _ = _period_bucket(datetime.fromisoformat(str(row["fill_ts"])), period)
+        order_key = (strategy_name, period_label, str(row["order_id"]))
+        if order_key in seen_orders:
+            continue
+        seen_orders.add(order_key)
+        trade_counts[(strategy_name, period_label)] += 1
+
+    results = []
+    for strategy_name, ts_equity_values in sorted(equity_by_strategy.items()):
+        period_values: dict[str, dict[str, float | str]] = {}
+        for ts, equity, _ in ts_equity_values:
+            period_label, period_start, period_end = _period_bucket(ts, period)
+            bucket = period_values.get(period_label)
+            if bucket is None:
+                period_values[period_label] = {
+                    "strategy_name": strategy_name,
+                    "period": period_label,
+                    "period_start": period_start,
+                    "period_end": period_end,
+                    "starting_equity": equity,
+                    "ending_equity": equity,
+                }
+                continue
+            bucket["ending_equity"] = equity
+
+        for period_label in sorted(period_values):
+            bucket = period_values[period_label]
+            starting_equity = float(bucket["starting_equity"])
+            ending_equity = float(bucket["ending_equity"])
+            results.append(
+                {
+                    "strategy_name": strategy_name,
+                    "period": str(bucket["period"]),
+                    "period_start": str(bucket["period_start"]),
+                    "period_end": str(bucket["period_end"]),
+                    "starting_equity": round(starting_equity, 4),
+                    "ending_equity": round(ending_equity, 4),
+                    "pnl": round(ending_equity - starting_equity, 4),
+                    "n_trades": trade_counts.get((strategy_name, period_label), 0),
+                }
+            )
     return results
 
 
@@ -666,5 +765,7 @@ def build_metrics_summary(conn: sqlite3.Connection, experiment_id: int, horizons
         "trade_pnl": compute_trade_pnl_details(conn, experiment_id),
         "calibration": compute_calibration_curve(conn, experiment_id),
         "sharpe_like": compute_sharpe_like(conn, experiment_id),
+        "weekly_performance": compute_periodic_performance(conn, experiment_id, period="week"),
+        "monthly_performance": compute_periodic_performance(conn, experiment_id, period="month"),
         "edge_decay": compute_edge_decay(conn, experiment_id, horizons),
     }

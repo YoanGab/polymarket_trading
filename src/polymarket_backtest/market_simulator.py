@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
-from .types import FillResult, MarketState, OrderIntent
+from .types import FillResult, MarketState, OrderIntent, OrderLevel
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +72,12 @@ class MarketSimulator:
         next_market: MarketState | None,
         intent: OrderIntent,
     ) -> list[FillResult]:
+        effective_market = self._market_for_intent(market, intent)
+        effective_next_market = self._market_for_intent(next_market, intent) if next_market is not None else None
         estimate = (
-            self._simulate_aggressive(market, intent)
+            self._simulate_aggressive(effective_market, intent)
             if intent.liquidity_intent == "aggressive"
-            else self._simulate_passive(market, next_market, intent)
+            else self._simulate_passive(effective_market, effective_next_market, intent)
         )
         if estimate.quantity < self.minimum_fill_quantity:
             return []
@@ -90,9 +92,9 @@ class MarketSimulator:
             PolymarketFeeModel.taker_fee_usdc(
                 price=estimate.vwap_price,
                 quantity=estimate.quantity,
-                fees_enabled=market.fees_enabled and estimate.liquidity_role == "taker",
-                fee_rate=market.fee_rate,
-                exponent=market.fee_exponent,
+                fees_enabled=effective_market.fees_enabled and estimate.liquidity_role == "taker",
+                fee_rate=effective_market.fee_rate,
+                exponent=effective_market.fee_exponent,
             )
             if estimate.liquidity_role == "taker"
             else 0.0
@@ -100,7 +102,7 @@ class MarketSimulator:
         rebate_usdc = (
             PolymarketFeeModel.maker_rebate_usdc(
                 taker_fee_usdc=fee_usdc,
-                maker_rebate_rate=market.maker_rebate_rate,
+                maker_rebate_rate=effective_market.maker_rebate_rate,
                 eligible=self.maker_rebate_eligible,
             )
             if estimate.liquidity_role == "maker"
@@ -122,6 +124,46 @@ class MarketSimulator:
                 fill_delay_seconds=round(estimate.delay_seconds, 2),
             )
         ]
+
+    def _market_for_intent(self, market: MarketState | None, intent: OrderIntent) -> MarketState | None:
+        if market is None or not intent.is_no_bet:
+            return market
+        return self._complement_market(market)
+
+    def _complement_market(self, market: MarketState) -> MarketState:
+        return MarketState(
+            market_id=market.market_id,
+            title=market.title,
+            domain=market.domain,
+            market_type=market.market_type,
+            ts=market.ts,
+            status=market.status,
+            best_bid=self._clamp_price(1.0 - market.best_ask),
+            best_ask=self._clamp_price(1.0 - market.best_bid),
+            mid=self._clamp_price(1.0 - market.mid),
+            last_trade=self._clamp_price(1.0 - market.last_trade),
+            volume_1m=market.volume_1m,
+            volume_24h=market.volume_24h,
+            open_interest=market.open_interest,
+            tick_size=market.tick_size,
+            rules_text=market.rules_text,
+            additional_context=market.additional_context,
+            resolution_ts=market.resolution_ts,
+            fees_enabled=market.fees_enabled,
+            fee_rate=market.fee_rate,
+            fee_exponent=market.fee_exponent,
+            maker_rebate_rate=market.maker_rebate_rate,
+            orderbook=[
+                OrderLevel(
+                    side="ask" if level.side == "bid" else "bid",
+                    price=self._clamp_price(1.0 - level.price),
+                    quantity=level.quantity,
+                    level_no=level.level_no,
+                )
+                for level in market.orderbook
+                if level.quantity > 0
+            ],
+        )
 
     def simulate_market_order(
         self,

@@ -1,12 +1,13 @@
 """Multiprocessing support for parallel market evaluation.
 
 Splits market_ids into N groups and runs each group in a separate process.
-Each worker opens its own disk-based read-only DB connection (WAL mode allows
-concurrent readers) and writes output to its own in-memory DB.  The main
-process merges worker results into the primary connection.
+Each worker opens its own disk-based DB connection.  WAL mode (already enabled
+by ``db.connect``) allows concurrent readers AND writers without locking
+contention -- readers never block writers, writers only block other writers for
+the brief moment of page commit.
 
-This avoids the 8x20GB RAM explosion that would occur if each worker copied
-the full DB into memory.
+Workers all share the same experiment_id (created by the main process) and
+write disjoint market_ids, so there is no row-level conflict.
 """
 
 from __future__ import annotations
@@ -34,15 +35,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOOKBACK_MINUTES = 240
 DEFAULT_MODEL_RELEASE = os.environ.get("GROK_MODEL_RELEASE", "grok-3")
 
-# Output tables that workers write to and that need merging.
-_OUTPUT_TABLES = [
-    "model_outputs",
-    "orders",
-    "fills",
-    "positions",
-    "pnl_marks",
-]
-
 
 def _split_market_ids(market_ids: list[str], n_groups: int) -> list[list[str]]:
     """Split market_ids into n_groups roughly equal batches."""
@@ -60,9 +52,9 @@ def _split_market_ids(market_ids: list[str], n_groups: int) -> list[list[str]]:
 def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
     """Worker function for parallel market processing.
 
-    Runs in a child process.  Opens its own disk-based DB connection for reads
-    and writes output rows to an in-memory DB.  Returns the output rows as
-    lists of tuples for merging back into the main DB.
+    Runs in a child process.  Opens its own disk-based DB connection (WAL
+    mode enables concurrent reads and writes).  All output rows are written
+    directly to the on-disk DB under the shared experiment_id.
 
     Args is a tuple of:
         (db_path, market_ids, strategy_dicts, starting_cash, transport_mode,
@@ -80,21 +72,15 @@ def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
     ) = args
 
     worker_name = f"worker-{worker_index}"
-    logger.info("[%s] Starting with %d markets", worker_name, len(market_ids))
+    print(f"[{worker_name}] Starting with {len(market_ids)} markets")
 
     # Reconstruct strategies from dicts (StrategyConfig is frozen dataclass).
     # ty cannot verify **dict unpacking statically, but dc_asdict() guarantees
     # all required fields are present.
     strategies = [StrategyConfig(**d) for d in strategy_dicts]  # type: ignore[missing-argument]
 
-    # Open disk-based read connection (WAL allows concurrent readers)
-    read_conn = db.connect(db_path)
-
-    # Create an in-memory DB for writes
-    write_conn = sqlite3.connect(":memory:")
-    write_conn.row_factory = sqlite3.Row
-    write_conn.execute("PRAGMA foreign_keys = OFF")  # No FK checks in worker
-    db.init_db(write_conn)
+    # Open disk-based connection (WAL allows concurrent reads + writes)
+    conn = db.connect(db_path)
 
     # Create the transport
     transport: ForecastTransport
@@ -118,47 +104,8 @@ def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
         eval_stride=eval_stride,
     )
 
-    # Build a "split" connection that reads from disk but writes to memory.
-    # The ReplayEngine needs a single conn for both reads and writes.
-    # We use the disk connection and intercept writes via a custom wrapper.
-    # Actually — simpler approach: attach the disk DB to the in-memory DB
-    # so the worker has one connection that reads source data from the
-    # attached DB and writes output to the in-memory tables.
-
-    # Attach the disk DB as a read source
-    write_conn.execute(f"ATTACH DATABASE 'file:{db_path}?mode=ro' AS source")
-
-    # Create views in main (in-memory) that proxy read-only tables from source.
-    # This way the ReplayEngine's reads hit the disk DB, while writes go to
-    # the in-memory tables.
-    _SOURCE_TABLES = [
-        "markets",
-        "market_snapshots",
-        "market_rule_revisions",
-        "orderbook_levels",
-        "news_documents",
-        "market_news_links",
-        "market_resolutions",
-    ]
-    for table in _SOURCE_TABLES:
-        # Drop the local table created by init_db and replace with a view
-        write_conn.execute(f"DROP TABLE IF EXISTS main.{table}")
-        write_conn.execute(f"CREATE VIEW main.{table} AS SELECT * FROM source.{table}")
-
-    # We also need the experiments table to exist with the experiment_id row.
-    # Insert a stub row so FK-free writes referencing experiment_id work.
-    write_conn.execute(
-        """
-        INSERT INTO experiments (id, name, model_id, model_release,
-                                 system_prompt_hash, config_json)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (experiment_id, f"parallel_{worker_name}", model_id, DEFAULT_MODEL_RELEASE, "", "{}"),
-    )
-
-    # Build grok client using the write_conn (which reads from attached source)
     grok = ReplayGrokClient(
-        conn=write_conn,
+        conn=conn,
         experiment_id=experiment_id,
         model_id=model_id,
         model_release=DEFAULT_MODEL_RELEASE,
@@ -169,64 +116,20 @@ def _worker_run_markets(args: tuple[Any, ...]) -> dict[str, Any]:
     grok.context_builder.skip_related_markets = True
 
     engine = ReplayEngine(
-        conn=write_conn,
+        conn=conn,
         config=config,
         grok=grok,
         strategies=strategies,
     )
     engine.run_markets(market_ids)
 
-    # Extract output rows from in-memory tables
-    output_data: dict[str, list[tuple[Any, ...]]] = {}
-    for table in _OUTPUT_TABLES:
-        rows = write_conn.execute(f"SELECT * FROM main.{table}").fetchall()
-        if rows:
-            output_data[table] = [tuple(row) for row in rows]
-        else:
-            output_data[table] = []
+    conn.close()
 
-    # Also extract column names for each table (needed for INSERT)
-    column_info: dict[str, list[str]] = {}
-    for table in _OUTPUT_TABLES:
-        pragma_rows = write_conn.execute(f"PRAGMA table_info({table})").fetchall()
-        column_info[table] = [str(r[1]) for r in pragma_rows]
-
-    read_conn.close()
-    write_conn.close()
-
-    logger.info("[%s] Finished processing %d markets", worker_name, len(market_ids))
+    print(f"[{worker_name}] Finished processing {len(market_ids)} markets")
 
     return {
-        "output_data": output_data,
-        "column_info": column_info,
         "n_markets": len(market_ids),
     }
-
-
-def _merge_worker_results(
-    conn: sqlite3.Connection,
-    worker_results: list[dict[str, Any]],
-) -> None:
-    """Merge output rows from all workers into the main connection."""
-    for result in worker_results:
-        output_data = result["output_data"]
-        column_info = result["column_info"]
-        for table in _OUTPUT_TABLES:
-            rows = output_data.get(table, [])
-            if not rows:
-                continue
-            columns = column_info[table]
-            # Skip auto-increment 'id' column for tables that have it
-            if table in ("model_outputs", "pnl_marks") and columns and columns[0] == "id":
-                columns = columns[1:]
-                rows = [row[1:] for row in rows]
-            col_list = ", ".join(columns)
-            placeholders = ", ".join("?" for _ in columns)
-            conn.executemany(
-                f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})",
-                rows,
-            )
-    conn.commit()
 
 
 def run_parallel_grid_search(
@@ -244,7 +147,9 @@ def run_parallel_grid_search(
 
     Args:
         db_path: Path to the on-disk SQLite database.
-        conn: Main process connection (for creating experiment and merging).
+        conn: Main process connection (for creating experiment and computing
+            metrics after workers finish).  Must be a disk-based connection
+            (not in-memory).
         strategies: Strategy configs to evaluate.
         starting_cash: Starting cash per strategy.
         transport_mode: Transport mode string (e.g. "smart_rules").
@@ -328,20 +233,27 @@ def run_parallel_grid_search(
         for i, group in enumerate(groups)
     ]
 
-    # Run workers
+    # Ensure experiment row is committed so workers can see it
+    conn.commit()
+
+    # Run workers (each opens its own connection)
     ctx = mp.get_context("spawn")  # spawn is safest for SQLite
     with ctx.Pool(processes=actual_workers) as pool:
         results = pool.map(_worker_run_markets, worker_args)
 
-    # Merge all worker output into main connection
-    print(f"[Parallel] Merging results from {actual_workers} workers")
-    _merge_worker_results(conn, results)
+    total_markets = sum(r["n_markets"] for r in results)
+    print(f"[Parallel] Workers done. Processed {total_markets} markets across {actual_workers} workers")
+
+    # Workers wrote to the on-disk DB.  The main conn (also on-disk, WAL mode)
+    # needs to start a fresh read transaction to see the workers' committed
+    # writes.  Executing any statement implicitly starts a new transaction.
+    # Force a checkpoint to merge WAL into main DB file first.
+    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     # Compute metrics on merged data
     persist_metric_results(conn, experiment_id, config.markout_horizons_min)
     summary = build_metrics_summary(conn, experiment_id, config.markout_horizons_min)
 
-    total_markets = sum(r["n_markets"] for r in results)
-    print(f"[Parallel] Done. Processed {total_markets} markets across {actual_workers} workers")
+    print(f"[Parallel] Done. Metrics computed for experiment {experiment_id}")
 
     return experiment_id, summary

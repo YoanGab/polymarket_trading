@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -23,6 +24,7 @@ from polymarket_backtest.types import (
     PositionState,
     ReplayConfig,
     StrategyConfig,
+    isoformat,
 )
 
 
@@ -188,6 +190,73 @@ def test_ml_transport_uses_bundle_as_of_for_resolution_features() -> None:
     assert captured["hours_to_resolution"] == pytest.approx(48.0)
 
 
+def test_ml_transport_uses_prev_snapshots_for_history_features() -> None:
+    transport = object.__new__(MLModelTransport)
+    transport.agent_name = "ml_model"
+    transport.model_id = "lightgbm"
+    transport._feature_names = [
+        "momentum_3h",
+        "momentum_24h",
+        "volatility_24h",
+        "volume_trend",
+        "price_range_24h",
+    ]
+    captured: dict[str, float] = {}
+
+    def _capture_predict(X: np.ndarray) -> np.ndarray:
+        captured.update(dict(zip(transport._feature_names, X[0], strict=True)))
+        return np.array([0.62], dtype=np.float32)
+
+    transport._predict = _capture_predict
+
+    prev_snapshots = []
+    prev_mids = [0.20 + (i * 0.01) for i in range(24)]
+    prev_volumes = [1_000.0 + (i * 50.0) for i in range(24)]
+    base_ts = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    for index, (mid, volume_24h) in enumerate(zip(prev_mids, prev_volumes, strict=True)):
+        prev_snapshots.append(
+            {
+                "market_id": "market-1",
+                "ts": isoformat(base_ts + timedelta(hours=index)),
+                "best_bid": mid - 0.01,
+                "best_ask": mid + 0.01,
+                "mid": mid,
+                "last_trade": mid,
+                "volume_1m": 100.0 + index,
+                "volume_24h": volume_24h,
+                "open_interest": 500.0,
+                "resolution_ts": isoformat(base_ts + timedelta(days=3)),
+            }
+        )
+
+    MLModelTransport.complete(
+        transport,
+        model_release="test-release",
+        system_prompt="",
+        context_bundle={
+            "as_of": isoformat(base_ts + timedelta(hours=24)),
+            "market": {
+                "market_id": "market-1",
+                "best_bid": 0.44,
+                "best_ask": 0.46,
+                "mid": 0.45,
+                "last_trade": 0.45,
+                "volume_1m": 200.0,
+                "volume_24h": 2_250.0,
+                "open_interest": 500.0,
+                "resolution_ts": isoformat(base_ts + timedelta(days=3)),
+            },
+            "prev_snapshots": prev_snapshots,
+        },
+    )
+
+    assert captured["momentum_3h"] == pytest.approx(0.04)
+    assert captured["momentum_24h"] == pytest.approx(0.25)
+    assert captured["volatility_24h"] == pytest.approx(float(np.std(prev_mids)))
+    assert captured["volume_trend"] == pytest.approx((2100.0 - 1950.0) / 1950.0)
+    assert captured["price_range_24h"] == pytest.approx(0.23)
+
+
 def test_ml_transport_confidence_uses_tradable_edge() -> None:
     transport = object.__new__(MLModelTransport)
     transport.agent_name = "ml_model"
@@ -228,6 +297,91 @@ def test_ml_transport_confidence_uses_tradable_edge() -> None:
 
     assert no_edge["confidence"] == pytest.approx(0.5)
     assert positive_edge["confidence"] == pytest.approx(0.6)
+
+
+def test_process_market_snapshot_passes_prev_snapshots_to_forecast() -> None:
+    engine = object.__new__(ReplayEngine)
+    engine.strategies = []
+    engine.portfolios = {}
+
+    market = _make_market_state(datetime(2026, 1, 15, 12, 0, tzinfo=UTC))
+    history_entries: list[tuple[str, dict[str, float | str | None]]] = []
+    for hours_ago in range(30, 0, -1):
+        ts = market.ts - timedelta(hours=hours_ago)
+        mid = 0.20 + ((30 - hours_ago) * 0.01)
+        history_entries.append(
+            (
+                isoformat(ts),
+                {
+                    "market_id": market.market_id,
+                    "ts": isoformat(ts),
+                    "status": "active",
+                    "best_bid": mid - 0.01,
+                    "best_ask": mid + 0.01,
+                    "mid": mid,
+                    "last_trade": mid,
+                    "volume_1m": 100.0,
+                    "volume_24h": 1_000.0 + hours_ago,
+                    "open_interest": 500.0,
+                    "tick_size": 0.01,
+                    "resolution_ts": isoformat(market.resolution_ts) if market.resolution_ts is not None else None,
+                },
+            )
+        )
+    history_entries.append(
+        (
+            isoformat(market.ts),
+            {
+                "market_id": market.market_id,
+                "ts": isoformat(market.ts),
+                "status": market.status,
+                "best_bid": market.best_bid,
+                "best_ask": market.best_ask,
+                "mid": market.mid,
+                "last_trade": market.last_trade,
+                "volume_1m": market.volume_1m,
+                "volume_24h": market.volume_24h,
+                "open_interest": market.open_interest,
+                "tick_size": market.tick_size,
+                "resolution_ts": isoformat(market.resolution_ts) if market.resolution_ts is not None else None,
+            },
+        )
+    )
+    engine._history_by_market = {market.market_id: history_entries}
+    engine._history_index_by_key = {
+        (market.market_id, ts_str): index for index, (ts_str, _) in enumerate(history_entries)
+    }
+    engine._get_market_history = ReplayEngine._get_market_history.__get__(engine, ReplayEngine)
+    engine._is_market_resolved_as_of = lambda market_id, timestamp: False
+    engine._get_cached_market = lambda market_id, timestamp: market
+    engine._get_cached_next_market = lambda market_id, timestamp: None
+    engine._persist_model_output = lambda forecast, prompt_hash, context_hash: None
+
+    captured: dict[str, Any] = {}
+
+    def _forecast(
+        market_id: str,
+        timestamp: datetime,
+        *,
+        market_state: MarketState | None = None,
+        prev_snapshots: list[dict[str, Any]] | None = None,
+    ) -> tuple[Any, str, str]:
+        captured["market_id"] = market_id
+        captured["timestamp"] = timestamp
+        captured["market_state"] = market_state
+        captured["prev_snapshots"] = list(prev_snapshots or [])
+        return _make_forecast(), "prompt-hash", "context-hash"
+
+    engine.grok = SimpleNamespace(forecast=_forecast)
+
+    ReplayEngine._process_market_snapshot(engine, market.market_id, market.ts)
+
+    assert captured["market_id"] == market.market_id
+    assert captured["timestamp"] == market.ts
+    assert captured["market_state"] == market
+    assert len(captured["prev_snapshots"]) == 24
+    assert captured["prev_snapshots"][0]["ts"] == isoformat(market.ts - timedelta(hours=24))
+    assert captured["prev_snapshots"][-1]["ts"] == isoformat(market.ts - timedelta(hours=1))
 
 
 def test_passive_fill_uses_delayed_fill_timestamp() -> None:

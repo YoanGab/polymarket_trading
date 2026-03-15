@@ -3,6 +3,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from bisect import bisect_left
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,6 +54,8 @@ class ReplayEngine:
         self.strategy_engine = StrategyEngine()
         self._resolution_cache: dict[str, sqlite3.Row | None] = {}
         self._market_cache: dict[tuple[str, str], MarketState] = {}
+        self._history_by_market: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        self._history_index_by_key: dict[tuple[str, str], int] = {}
         self._next_ts_cache: dict[tuple[str, str], tuple[str, str] | None] = {}
         self.experiment_id = self.grok.experiment_id
         if self.experiment_id is None:
@@ -195,6 +198,8 @@ class ReplayEngine:
     def _preload_market_data(self, timelines: dict[str, list[datetime]]) -> None:
         """Batch-load market snapshots for timeline timestamps into memory."""
         self._market_cache = {}
+        self._history_by_market = {}
+        self._history_index_by_key = {}
         self._next_ts_cache = {}
         all_market_ids = list(timelines.keys())
         if not all_market_ids:
@@ -266,6 +271,7 @@ class ReplayEngine:
 
         # Load snapshots in chunks using exact (market_id, ts) matching
         chunk_size = 500
+        history_by_market: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         for chunk_start in range(0, len(ts_pairs), chunk_size):
             chunk = ts_pairs[chunk_start : chunk_start + chunk_size]
             # Use a VALUES-based approach for exact lookups
@@ -321,10 +327,40 @@ class ReplayEngine:
                     orderbook=[],
                 )
                 self._market_cache[(market_id, ts_str)] = state
+                history_by_market.setdefault(market_id, []).append(
+                    (
+                        ts_str,
+                        {
+                            "market_id": market_id,
+                            "ts": ts_str,
+                            "status": str(row["status"]),
+                            "best_bid": float(row["best_bid"]),
+                            "best_ask": float(row["best_ask"]),
+                            "mid": float(row["mid"]),
+                            "last_trade": float(row["last_trade"]),
+                            "volume_1m": float(row["volume_1m"]),
+                            "volume_24h": float(row["volume_24h"]),
+                            "open_interest": float(row["open_interest"]),
+                            "tick_size": float(row["tick_size"]),
+                            "resolution_ts": (
+                                isoformat(datetime.fromisoformat(str(meta["resolution_ts"])))
+                                if meta["resolution_ts"]
+                                else None
+                            ),
+                        },
+                    )
+                )
+
+        for market_id, history in history_by_market.items():
+            history.sort(key=lambda item: item[0])
+            self._history_by_market[market_id] = history
+            for index, (ts_str, _) in enumerate(history):
+                self._history_index_by_key[(market_id, ts_str)] = index
 
         logger.info(
-            "Preloaded %d market states for %d markets",
+            "Preloaded %d market states and %d market histories for %d markets",
             len(self._market_cache),
+            len(self._history_by_market),
             len(all_market_ids),
         )
 
@@ -356,6 +392,25 @@ class ReplayEngine:
             return None
         return db.get_next_market_state(self.conn, market_id, timestamp)
 
+    def _get_market_history(
+        self,
+        market_id: str,
+        timestamp: datetime,
+        *,
+        lookback: int = 24,
+    ) -> list[dict[str, Any]]:
+        history = self._history_by_market.get(market_id, [])
+        if not history or lookback <= 0:
+            return []
+
+        ts_key = isoformat(timestamp)
+        current_index = self._history_index_by_key.get((market_id, ts_key))
+        if current_index is None:
+            current_index = bisect_left([entry_ts for entry_ts, _ in history], ts_key)
+
+        start_index = max(0, current_index - lookback)
+        return [snapshot for _, snapshot in history[start_index:current_index]]
+
     def _process_market_snapshot(self, market_id: str, timestamp: datetime) -> None:
         if self._is_market_resolved_as_of(market_id, timestamp):
             logger.info(
@@ -376,9 +431,15 @@ class ReplayEngine:
 
         market = self._normalize_quotes(market)
         market = self._ensure_orderbook(market, reason="current_snapshot")
+        history = self._get_market_history(market_id, timestamp, lookback=24)
 
         try:
-            forecast, prompt_hash, context_hash = self.grok.forecast(market_id, timestamp, market_state=market)
+            forecast, prompt_hash, context_hash = self.grok.forecast(
+                market_id,
+                timestamp,
+                market_state=market,
+                prev_snapshots=history,
+            )
         except Exception:
             logger.exception(
                 "Forecast failed for market_id=%s at ts=%s",
@@ -440,7 +501,9 @@ class ReplayEngine:
                     market,
                     next_market,
                     order,
-                    entry_probability=market.best_ask + (order.edge_bps / 10_000.0),
+                    entry_probability=(
+                        1.0 - forecast.probability_yes if order.is_no_bet else forecast.probability_yes
+                    ),
                 )
 
             self._mark_portfolio_from_market(
@@ -646,10 +709,12 @@ class ReplayEngine:
             if next_market is not None
             else self._build_degraded_next_market(market, order)
         )
+        effective_market = self.simulator._market_for_intent(market, order)
+        effective_execution_next_market = self.simulator._market_for_intent(effective_next_market, order)
         fill_estimate = (
-            self.simulator._simulate_aggressive(market, order)
+            self.simulator._simulate_aggressive(effective_market, order)
             if order.liquidity_intent == "aggressive"
-            else self.simulator._simulate_passive(market, effective_next_market, order)
+            else self.simulator._simulate_passive(effective_market, effective_execution_next_market, order)
         )
         estimated_notional = fill_estimate.vwap_price * fill_estimate.quantity
         if order.side == "buy" and estimated_notional > portfolio.cash:
@@ -699,7 +764,13 @@ class ReplayEngine:
         for fill in fills:
             total_filled += fill.quantity
             self._persist_fill(fill)
-            self._apply_fill(portfolio, fill, order.thesis, entry_probability)
+            self._apply_fill(
+                portfolio,
+                fill,
+                order.thesis,
+                entry_probability,
+                is_no_bet=order.is_no_bet,
+            )
         self.conn.execute(
             "UPDATE orders SET filled_quantity = ? WHERE order_id = ?",
             (total_filled, order_id),
@@ -739,6 +810,8 @@ class ReplayEngine:
         fill: FillResult,
         thesis: str,
         entry_probability: float,
+        *,
+        is_no_bet: bool = False,
     ) -> None:
         position = portfolio.positions.setdefault(
             fill.market_id,
@@ -800,6 +873,7 @@ class ReplayEngine:
                 position.closed_ts = None
                 position.entry_probability = entry_probability
                 position.thesis = thesis
+                position.is_no_bet = is_no_bet
         else:
             # Fix 6: warn when sell quantity exceeds position
             if fill.quantity > position.quantity:
@@ -836,10 +910,10 @@ class ReplayEngine:
     ) -> None:
         market = self._normalize_quotes(market)
         market_id = market.market_id
-        portfolio.last_known_mids[market_id] = market.mid
         position = portfolio.positions.get(market_id)
+        mark_price = self._position_mark_price(market, position)
+        portfolio.last_known_mids[market_id] = mark_price
         position_qty = position.quantity if position is not None else 0.0
-        mark_price = market.mid
         inventory_value = position_qty * mark_price
         total_inventory_value = sum(
             position_state.quantity * portfolio.last_known_mids.get(position_market_id, position_state.avg_entry_price)
@@ -885,13 +959,14 @@ class ReplayEngine:
                 if ensure_utc(replay_ts) < ensure_utc(resolution_ts):
                     continue
 
-                payout_ratio = self._normalized_resolved_outcome(
+                resolved_outcome = self._normalized_resolved_outcome(
                     resolution,
                     market_id,
                     log_ambiguity=True,
                 )
-                if payout_ratio is None:
+                if resolved_outcome is None:
                     continue
+                payout_ratio = self._payout_ratio_for_position(position, resolved_outcome)
 
                 gross_payout = payout_ratio * position.quantity
                 # Polymarket fees: 2% on profit (winnings), not on total payout
@@ -901,7 +976,7 @@ class ReplayEngine:
                 settlement_increment = net_payout - position.avg_entry_price * position.quantity
                 logger.info(
                     "Settling strategy=%s market_id=%s qty=%.4f payout_ratio=%.4f "
-                    "gross_payout=%.4f settlement_fee=%.4f net_payout=%.4f "
+                    "gross_payout=%.4f settlement_fee=%.4f net_payout=%.4f is_no_bet=%s "
                     "replay_ts=%s resolution_ts=%s",
                     strategy.name,
                     market_id,
@@ -910,6 +985,7 @@ class ReplayEngine:
                     gross_payout,
                     settlement_fee,
                     net_payout,
+                    position.is_no_bet,
                     isoformat(replay_ts),
                     isoformat(resolution_ts),
                 )
@@ -930,6 +1006,7 @@ class ReplayEngine:
         position.entry_probability = 0.0
         position.thesis = ""
         position.avg_entry_price = 0.0
+        position.is_no_bet = False
         del portfolio.positions[market_id]
 
     def _persist_position(self, position: PositionState) -> None:
@@ -949,8 +1026,9 @@ class ReplayEngine:
             )
             resolution_ts = str(resolution["resolution_ts"]) if resolution["resolution_ts"] else None
             if position.total_opened_quantity > 0 and resolved_outcome is not None:
+                payout_ratio = self._payout_ratio_for_position(position, resolved_outcome)
                 hold_to_resolution_pnl = (
-                    (resolved_outcome * position.total_opened_quantity)
+                    (payout_ratio * position.total_opened_quantity)
                     - position.total_opened_notional
                     - position.fees_paid
                     + position.rebates_earned
@@ -984,6 +1062,14 @@ class ReplayEngine:
                 position.thesis,
             ),
         )
+
+    def _position_mark_price(self, market: MarketState, position: PositionState | None) -> float:
+        if position is not None and position.is_no_bet:
+            return min(0.999, max(0.001, 1.0 - market.mid))
+        return market.mid
+
+    def _payout_ratio_for_position(self, position: PositionState, resolved_outcome: float) -> float:
+        return 1.0 - resolved_outcome if position.is_no_bet else resolved_outcome
 
     def _persist_positions(self) -> None:
         for strategy in self.strategies:

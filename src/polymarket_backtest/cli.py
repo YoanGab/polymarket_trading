@@ -19,6 +19,7 @@ from .metrics import (
     build_metrics_summary,
     compute_calibration_curve,
     compute_edge_decay,
+    compute_periodic_performance,
     compute_pnl_summary,
     compute_sharpe_like,
     compute_trade_pnl_details,
@@ -524,6 +525,8 @@ def _load_metrics_summary(
         "trade_pnl": compute_trade_pnl_details(conn, experiment_id),
         "calibration": compute_calibration_curve(conn, experiment_id),
         "sharpe_like": compute_sharpe_like(conn, experiment_id),
+        "weekly_performance": compute_periodic_performance(conn, experiment_id, period="week"),
+        "monthly_performance": compute_periodic_performance(conn, experiment_id, period="month"),
         "edge_decay": compute_edge_decay(conn, experiment_id, horizons),
     }
 

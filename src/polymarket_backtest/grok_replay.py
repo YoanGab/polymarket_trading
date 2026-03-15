@@ -475,6 +475,7 @@ class ReplayContextBuilder:
         as_of: Any,
         *,
         market_state: MarketState | None = None,
+        prev_snapshots: list[dict[str, Any]] | None = None,
     ) -> ForecastInput:
         if market_state is not None:
             market = market_state
@@ -520,6 +521,7 @@ class ReplayContextBuilder:
             market=market,
             recent_news=news,
             related_markets=related,
+            prev_snapshots=list(prev_snapshots or []),
         )
 
 
@@ -580,6 +582,7 @@ class ReplayGrokClient:
                 for item in context.recent_news
             ],
             "related_markets": context.related_markets,
+            "prev_snapshots": context.prev_snapshots,
         }
 
     def forecast(
@@ -588,8 +591,14 @@ class ReplayGrokClient:
         as_of: Any,
         *,
         market_state: MarketState | None = None,
+        prev_snapshots: list[dict[str, Any]] | None = None,
     ) -> tuple[ForecastOutput, str, str]:
-        context = self.context_builder.build(market_id, as_of, market_state=market_state)
+        context = self.context_builder.build(
+            market_id,
+            as_of,
+            market_state=market_state,
+            prev_snapshots=prev_snapshots,
+        )
         context_bundle = self._bundle(context)
         system_prompt = build_temporal_system_prompt(context_bundle["as_of"])
         prompt_hash = stable_hash(system_prompt)

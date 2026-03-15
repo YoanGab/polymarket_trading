@@ -15,22 +15,48 @@ logger = logging.getLogger(__name__)
 MIN_ORDER_QUANTITY = 1.0
 
 
+def normalized_contract_price(price: float) -> float:
+    if price <= 0 or price >= 1:
+        logger.warning("Clamping out-of-range price %.6f to [0.001, 0.999]", price)
+    return min(0.999, max(0.001, price))
+
+
 def estimated_fee_bps(price: float, fee_rate: float = 0.02) -> float:
     """Estimate round-trip fee in basis points for a trade at the given price."""
     per_side = min(price, 1.0 - price) * fee_rate
     return per_side * 10_000.0
 
 
-def kelly_fraction_for_yes(price: float, probability_yes: float) -> float:
+def kelly_fraction_for_probability(price: float, probability: float) -> float:
     if price >= 1.0:
         return 0.0
-    return max(0.0, (probability_yes - price) / max(1.0 - price, 1e-9))
+    return max(0.0, (probability - price) / max(1.0 - price, 1e-9))
+
+
+def kelly_fraction_for_yes(price: float, probability_yes: float) -> float:
+    return kelly_fraction_for_probability(price, probability_yes)
 
 
 def normalized_ask_price(price: float) -> float:
-    if price <= 0 or price >= 1:
-        logger.warning("Clamping out-of-range price %.6f to [0.001, 0.999]", price)
-    return min(0.999, max(0.001, price))
+    return normalized_contract_price(price)
+
+
+def no_ask_price(market: MarketState) -> float:
+    return normalized_contract_price(1.0 - market.best_bid)
+
+
+def no_bid_price(market: MarketState) -> float:
+    return normalized_contract_price(1.0 - market.best_ask)
+
+
+def held_contract_probability(forecast: ForecastOutput, *, is_no_bet: bool) -> float:
+    return 1.0 - forecast.probability_yes if is_no_bet else forecast.probability_yes
+
+
+def position_mark_price(market: MarketState, position: PositionState) -> float:
+    if position.is_no_bet:
+        return normalized_contract_price(1.0 - market.mid)
+    return normalized_contract_price(market.mid)
 
 
 @dataclass
@@ -73,17 +99,28 @@ class StrategyEngine:
     ) -> bool:
         if position is None or position.quantity <= 0:
             return False
+
+        current_price = position_mark_price(market, position)
+
+        if config.profit_target_pct > 0 and position.avg_entry_price < 1.0:
+            max_gain = 1.0 - position.avg_entry_price
+            current_gain = current_price - position.avg_entry_price
+            if current_gain >= max_gain * config.profit_target_pct:
+                return True
+
         opened_ts = position.opened_ts
-        if opened_ts is None:
-            return False
+        if config.time_exit_hours > 0 and opened_ts is not None:
+            age_hours = (ensure_utc(market.ts) - ensure_utc(opened_ts)).total_seconds() / 3600.0
+            if age_hours >= config.time_exit_hours:
+                return True
+
         max_hold = config.max_holding_minutes
-        if config.use_time_stop and max_hold is not None:
+        if config.use_time_stop and max_hold is not None and opened_ts is not None:
             age_minutes = (ensure_utc(market.ts) - ensure_utc(opened_ts)).total_seconds() / 60.0
             if age_minutes >= max_hold:
                 return True
-        return (
-            config.use_thesis_stop and forecast.probability_yes < position.entry_probability - config.thesis_stop_delta
-        )
+        held_probability = held_contract_probability(forecast, is_no_bet=position.is_no_bet)
+        return config.use_thesis_stop and held_probability < position.entry_probability - config.thesis_stop_delta
 
     def exit_order(
         self,
@@ -92,18 +129,20 @@ class StrategyEngine:
         market: MarketState,
         position: PositionState,
     ) -> OrderIntent:
+        exit_price = no_bid_price(market) if position.is_no_bet else market.best_bid
         return OrderIntent(
             strategy_name=config.name,
             market_id=market.market_id,
             ts=market.ts,
             side="sell",
             liquidity_intent="aggressive",
-            limit_price=market.best_bid,
+            limit_price=exit_price,
             requested_quantity=position.quantity,
             kelly_fraction=config.kelly_fraction,
             edge_bps=0.0,
             holding_period_minutes=0,
             thesis=f"Exit due to {config.name} stop policy",
+            is_no_bet=position.is_no_bet,
         )
 
     def _carry_only(
@@ -550,7 +589,7 @@ class StrategyEngine:
             return []
 
         if position is not None and position.quantity > 0:
-            # Pure hold-to-resolution: no early exits
+            # Generic exits run before decide(); don't add to an existing position here.
             return []
 
         # Target mid-range markets (configurable via extreme_low/extreme_high)
@@ -562,13 +601,6 @@ class StrategyEngine:
         if forecast.confidence < config.min_confidence:
             return []
 
-        ask_price = normalized_ask_price(market.best_ask)
-        edge_bps = (forecast.probability_yes - ask_price) * 10_000.0
-        fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
-        net_edge_bps = edge_bps - fee_bps
-        if net_edge_bps < config.edge_threshold_bps:
-            return []
-
         # Scale down for edge-of-range markets (further from 0.50 = less confident)
         half_range = max(0.01, (mid_high - mid_low) / 2.0)
         mid_distance = abs(market.mid - 0.50) / half_range
@@ -576,16 +608,57 @@ class StrategyEngine:
             mid_factor = 1.0
         else:
             mid_factor = max(0.05, 2.0 * (1.0 - mid_distance))
-        kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
         confidence_factor = min(3.0, max(0.5, (forecast.confidence - 0.55) * 10.0))
-        notional = min(
-            config.max_position_notional,
-            available_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
-        )
-        if notional <= 0:
+
+        ask_price = normalized_ask_price(market.best_ask)
+        edge_bps = (forecast.probability_yes - ask_price) * 10_000.0
+        fee_bps = estimated_fee_bps(ask_price, market.fee_rate)
+        net_edge_bps = edge_bps - fee_bps
+        if net_edge_bps >= config.edge_threshold_bps:
+            kelly = kelly_fraction_for_yes(ask_price, forecast.probability_yes)
+            notional = min(
+                config.max_position_notional,
+                available_cash * config.kelly_fraction * kelly * mid_factor * confidence_factor,
+            )
+            if notional > 0:
+                quantity = notional / ask_price
+                if quantity >= MIN_ORDER_QUANTITY:
+                    return [
+                        OrderIntent(
+                            strategy_name=config.name,
+                            market_id=market.market_id,
+                            ts=market.ts,
+                            side="buy",
+                            liquidity_intent="aggressive",
+                            limit_price=ask_price,
+                            requested_quantity=quantity,
+                            kelly_fraction=config.kelly_fraction,
+                            edge_bps=net_edge_bps,
+                            holding_period_minutes=int(hours_to_res * 60),
+                            thesis=(
+                                f"Resolution convergence: {hours_to_res:.0f}h to resolution, "
+                                f"mid={market.mid:.2f}"
+                            ),
+                        ),
+                    ]
+
+        no_price = no_ask_price(market)
+        no_edge_bps = (market.best_bid - forecast.probability_yes) * 10_000.0
+        fee_bps_no = estimated_fee_bps(no_price, market.fee_rate)
+        net_no_edge = no_edge_bps - fee_bps_no
+        if net_no_edge < config.edge_threshold_bps:
             return []
-        quantity = notional / ask_price
-        if quantity < MIN_ORDER_QUANTITY:
+
+        probability_no = 1.0 - forecast.probability_yes
+        kelly_no = kelly_fraction_for_probability(no_price, probability_no)
+        notional_no = min(
+            config.max_position_notional,
+            available_cash * config.kelly_fraction * kelly_no * mid_factor * confidence_factor,
+        )
+        if notional_no <= 0:
+            return []
+        quantity_no = notional_no / no_price
+        if quantity_no < MIN_ORDER_QUANTITY:
             return []
         return [
             OrderIntent(
@@ -594,12 +667,16 @@ class StrategyEngine:
                 ts=market.ts,
                 side="buy",
                 liquidity_intent="aggressive",
-                limit_price=ask_price,
-                requested_quantity=quantity,
+                limit_price=no_price,
+                requested_quantity=quantity_no,
                 kelly_fraction=config.kelly_fraction,
-                edge_bps=net_edge_bps,
+                edge_bps=net_no_edge,
                 holding_period_minutes=int(hours_to_res * 60),
-                thesis=f"Resolution convergence: {hours_to_res:.0f}h to resolution, mid={market.mid:.2f}",
+                thesis=(
+                    f"Resolution convergence NO: {hours_to_res:.0f}h to resolution, "
+                    f"mid={market.mid:.2f}"
+                ),
+                is_no_bet=True,
             ),
         ]
 

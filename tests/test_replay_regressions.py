@@ -6,7 +6,11 @@ from statistics import mean, stdev
 
 import pytest
 
-from polymarket_backtest.metrics import compute_calibration_curve, compute_sharpe_like
+from polymarket_backtest.metrics import (
+    compute_calibration_curve,
+    compute_periodic_performance,
+    compute_sharpe_like,
+)
 from polymarket_backtest.replay_engine import ReplayEngine, StrategyPortfolio
 from polymarket_backtest.strategies import StrategyEngine
 from polymarket_backtest.types import (
@@ -157,6 +161,138 @@ def test_strategy_engine_handles_zero_best_ask_without_division_error() -> None:
     assert orders[0].limit_price >= 0.001
 
 
+def test_resolution_convergence_can_buy_no_when_yes_is_overpriced() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="resolution_no",
+        family="resolution_convergence",
+        kelly_fraction=0.2,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+        min_confidence=0.7,
+        resolution_hours_max=72.0,
+        extreme_low=0.2,
+        extreme_high=0.8,
+    )
+    market = _make_market_state(best_bid=0.68, best_ask=0.70)
+    forecast = _make_forecast(probability_yes=0.45, confidence=0.9)
+
+    orders = engine.decide(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=None,
+        available_cash=1_000.0,
+    )
+
+    assert len(orders) == 1
+    assert orders[0].side == "buy"
+    assert orders[0].is_no_bet is True
+    assert orders[0].limit_price == pytest.approx(0.32)
+    assert "Resolution convergence NO" in orders[0].thesis
+
+
+def test_should_exit_uses_profit_target_for_no_positions() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="profit_target",
+        family="resolution_convergence",
+        kelly_fraction=0.1,
+        edge_threshold_bps=25.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+        profit_target_pct=0.5,
+    )
+    market = _make_market_state(best_bid=0.19, best_ask=0.21)
+    forecast = _make_forecast(probability_yes=0.25, confidence=0.8)
+    position = PositionState(
+        strategy_name="profit_target",
+        market_id=market.market_id,
+        quantity=10.0,
+        avg_entry_price=0.30,
+        total_opened_quantity=10.0,
+        total_opened_notional=3.0,
+        opened_ts=market.ts - timedelta(hours=4),
+        entry_probability=0.70,
+        is_no_bet=True,
+    )
+
+    should_exit = engine.should_exit(
+        config=config,
+        market=market,
+        forecast=forecast,
+        position=position,
+    )
+
+    assert should_exit is True
+
+
+def test_settle_resolved_positions_uses_no_payout_ratio() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE market_resolutions (
+            market_id TEXT PRIMARY KEY,
+            resolution_ts TEXT NOT NULL,
+            resolved_outcome REAL NOT NULL,
+            status TEXT NOT NULL,
+            disputed INTEGER NOT NULL DEFAULT 0,
+            clarification_issued INTEGER NOT NULL DEFAULT 0,
+            resolution_note TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    resolution_ts = datetime(2026, 1, 16, 12, 0, tzinfo=UTC)
+    conn.execute(
+        """
+        INSERT INTO market_resolutions (
+            market_id, resolution_ts, resolved_outcome, status, disputed, clarification_issued, resolution_note
+        ) VALUES (?, ?, ?, ?, 0, 0, '')
+        """,
+        ("test_market", resolution_ts.isoformat(), 0.0, "resolved"),
+    )
+
+    engine = object.__new__(ReplayEngine)
+    engine.conn = conn
+    engine.strategies = [
+        StrategyConfig(
+            name="resolution_no",
+            family="resolution_convergence",
+            kelly_fraction=0.1,
+            edge_threshold_bps=25.0,
+            max_position_notional=250.0,
+            max_holding_minutes=None,
+        )
+    ]
+    engine.portfolios = {
+        "resolution_no": StrategyPortfolio(
+            cash=5.0,
+            positions={
+                "test_market": PositionState(
+                    strategy_name="resolution_no",
+                    market_id="test_market",
+                    quantity=10.0,
+                    avg_entry_price=0.3,
+                    total_opened_quantity=10.0,
+                    total_opened_notional=3.0,
+                    opened_ts=resolution_ts - timedelta(hours=6),
+                    is_no_bet=True,
+                )
+            },
+        )
+    }
+    engine._resolution_cache = {}
+    engine._persist_position = lambda position: None
+
+    ReplayEngine._settle_resolved_positions(engine, resolution_ts)
+
+    assert engine.portfolios["resolution_no"].cash == pytest.approx(15.0)
+    assert engine.portfolios["resolution_no"].realized_pnl == pytest.approx(7.0)
+    assert "test_market" not in engine.portfolios["resolution_no"].positions
+
+
 def test_compute_calibration_curve_skips_unresolved_markets() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -201,7 +337,10 @@ def test_compute_sharpe_like_uses_active_daily_marks_only() -> None:
     )
 
     base_day = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
-    active_equities = [100.0, 108.0, 103.0, 117.0, 112.0, 126.0, 121.0, 135.0, 132.0, 145.0, 141.0, 154.0]
+    active_equities = [100.0]
+    active_deltas = [8.0, -5.0, 14.0, -5.0, 9.0]
+    for index in range(30):
+        active_equities.append(active_equities[-1] + active_deltas[index % len(active_deltas)])
     rows: list[tuple[int, str, str, str, float, float, float, float, float, float, float]] = []
 
     for day_offset, equity in enumerate(active_equities):
@@ -281,7 +420,12 @@ def test_compute_sharpe_like_uses_active_daily_marks_only() -> None:
             )
         )
 
-    for day_offset, equity in enumerate([100.0, 101.0, 103.0, 102.0, 104.0, 103.0, 105.0, 104.0, 106.0]):
+    too_short_equities = [100.0]
+    too_short_deltas = [1.0, 2.0, -1.0, 2.0, -1.0]
+    for index in range(28):
+        too_short_equities.append(too_short_equities[-1] + too_short_deltas[index % len(too_short_deltas)])
+
+    for day_offset, equity in enumerate(too_short_equities):
         day = base_day + timedelta(days=day_offset)
         rows.append(
             (
@@ -318,3 +462,99 @@ def test_compute_sharpe_like_uses_active_daily_marks_only() -> None:
 
     assert sharpe_by_strategy["active_strategy"] == expected_sharpe
     assert sharpe_by_strategy["too_short"] == 0.0
+
+
+def test_compute_periodic_performance_groups_by_iso_week_and_month() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE pnl_marks (
+            experiment_id INTEGER,
+            strategy_name TEXT,
+            market_id TEXT,
+            ts TEXT,
+            cash REAL,
+            position_qty REAL,
+            mark_price REAL,
+            inventory_value REAL,
+            equity REAL,
+            realized_pnl REAL,
+            unrealized_pnl REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE fills (
+            order_id TEXT,
+            experiment_id INTEGER,
+            strategy_name TEXT,
+            fill_ts TEXT
+        )
+        """
+    )
+
+    rows = [
+        (1, "active_strategy", "market-a", datetime(2026, 1, 1, 9, 0, tzinfo=UTC).isoformat(), 1000.0, 1.0, 0.5, 10.0, 100.0, 0.0, 0.0),
+        (1, "active_strategy", "market-a", datetime(2026, 1, 3, 12, 0, tzinfo=UTC).isoformat(), 1000.0, 1.0, 0.5, 10.0, 109.0, 0.0, 0.0),
+        (1, "active_strategy", "market-b", datetime(2026, 1, 3, 12, 0, tzinfo=UTC).isoformat(), 1000.0, 0.0, 0.5, 0.0, 110.0, 0.0, 0.0),
+        (1, "active_strategy", "market-a", datetime(2026, 1, 5, 9, 0, tzinfo=UTC).isoformat(), 1000.0, 1.0, 0.5, 10.0, 112.0, 0.0, 0.0),
+        (1, "active_strategy", "market-c", datetime(2026, 1, 8, 18, 0, tzinfo=UTC).isoformat(), 1000.0, 0.0, 0.5, 0.0, 125.0, 0.0, 0.0),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO pnl_marks (
+            experiment_id, strategy_name, market_id, ts, cash, position_qty,
+            mark_price, inventory_value, equity, realized_pnl, unrealized_pnl
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.executemany(
+        "INSERT INTO fills (order_id, experiment_id, strategy_name, fill_ts) VALUES (?, ?, ?, ?)",
+        [
+            ("order-1", 1, "active_strategy", datetime(2026, 1, 2, 10, 0, tzinfo=UTC).isoformat()),
+            ("order-1", 1, "active_strategy", datetime(2026, 1, 2, 10, 1, tzinfo=UTC).isoformat()),
+            ("order-2", 1, "active_strategy", datetime(2026, 1, 4, 14, 0, tzinfo=UTC).isoformat()),
+            ("order-3", 1, "active_strategy", datetime(2026, 1, 7, 11, 0, tzinfo=UTC).isoformat()),
+        ],
+    )
+
+    weekly = compute_periodic_performance(conn, 1, period="week")
+    monthly = compute_periodic_performance(conn, 1, period="month")
+
+    assert weekly == [
+        {
+            "strategy_name": "active_strategy",
+            "period": "2026-W01",
+            "period_start": "2025-12-29",
+            "period_end": "2026-01-04",
+            "starting_equity": 100.0,
+            "ending_equity": 110.0,
+            "pnl": 10.0,
+            "n_trades": 2,
+        },
+        {
+            "strategy_name": "active_strategy",
+            "period": "2026-W02",
+            "period_start": "2026-01-05",
+            "period_end": "2026-01-11",
+            "starting_equity": 112.0,
+            "ending_equity": 125.0,
+            "pnl": 13.0,
+            "n_trades": 1,
+        },
+    ]
+    assert monthly == [
+        {
+            "strategy_name": "active_strategy",
+            "period": "2026-01",
+            "period_start": "2026-01-01",
+            "period_end": "2026-01-31",
+            "starting_equity": 100.0,
+            "ending_equity": 125.0,
+            "pnl": 25.0,
+            "n_trades": 3,
+        }
+    ]
