@@ -333,8 +333,10 @@ def train_xgboost(
     train_y: np.ndarray,
     val_X: np.ndarray,
     val_y: np.ndarray,
+    *,
+    feat_names: list[str] | None = None,
 ) -> object:
-    """Train XGBoost with strong regularization."""
+    """Train XGBoost with resolution-proximity sample weighting."""
     import xgboost as xgb
     from sklearn.preprocessing import StandardScaler
 
@@ -342,7 +344,17 @@ def train_xgboost(
     X_scaled = scaler.fit_transform(train_X)
     val_scaled = scaler.transform(val_X)
 
-    dtrain = xgb.DMatrix(X_scaled, label=train_y)
+    # Weight samples by resolution proximity — emphasize near-resolution signals
+    train_weights = None
+    if feat_names and "resolution_proximity" in feat_names:
+        rp_idx = feat_names.index("resolution_proximity")
+        rp_raw = train_X[:, rp_idx]
+        train_weights = np.sqrt(0.5 + np.clip(rp_raw, 0, 1))
+        print(
+            f"  Sample weights: mean={train_weights.mean():.3f}, min={train_weights.min():.3f}, max={train_weights.max():.3f}"
+        )
+
+    dtrain = xgb.DMatrix(X_scaled, label=train_y, weight=train_weights)
     dval = xgb.DMatrix(val_scaled, label=val_y)
 
     params = {
@@ -921,7 +933,7 @@ def train_xgb_lr_blend(
 ) -> object:
     """Blend XGBoost + LR with optimal weights."""
     lr_model = train_logistic(train_X, train_y)
-    xgb_model = train_xgboost(train_X, train_y, val_X, val_y)
+    xgb_model = train_xgboost(train_X, train_y, val_X, val_y, feat_names=feature_names)
 
     lr_preds = predict(lr_model, val_X)
     xgb_preds = predict(xgb_model, val_X)
@@ -1174,7 +1186,7 @@ def main() -> None:
     elif args.model == "boosted_lr":
         model = train_boosted_lr(split.train_X, split.train_y, split.val_X, split.val_y)
     elif args.model == "xgboost":
-        model = train_xgboost(split.train_X, split.train_y, split.val_X, split.val_y)
+        model = train_xgboost(split.train_X, split.train_y, split.val_X, split.val_y, feat_names=feature_names)
     elif args.model == "catboost":
         model = train_catboost(split.train_X, split.train_y, split.val_X, split.val_y)
     elif args.model == "xgb_lr":
