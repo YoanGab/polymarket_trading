@@ -367,18 +367,19 @@ def train_xgboost(
         verbose_eval=False,
     )
 
-    # Platt scaling on a small random val subset (5%) — calibrates against target distribution
+    # Platt scaling calibration on held-out portion of training data
     from sklearn.linear_model import LogisticRegression as _LR
 
-    cal_size = min(len(val_y) // 20, 100000)
+    # Use a random 10% of training data for calibration (avoid overfitting on val)
+    cal_size = min(len(train_y) // 10, 500000)
     rng = np.random.RandomState(42)
-    cal_idx = rng.choice(len(val_y), cal_size, replace=False)
-    cal_preds = model.predict(xgb.DMatrix(val_scaled[cal_idx]))
-    cal_labels = val_y[cal_idx]
+    cal_idx = rng.choice(len(train_y), cal_size, replace=False)
+    cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
+    cal_labels = train_y[cal_idx]
 
     platt = _LR(C=1e6, max_iter=100, solver="lbfgs")
     platt.fit(cal_preds.reshape(-1, 1), cal_labels)
-    print(f"  XGBoost: Platt scaling on {cal_size} val samples (5% subset)")
+    print(f"  XGBoost: Platt scaling on {cal_size} calibration samples")
 
     return {"xgb_model": model, "scaler": scaler, "platt": platt}
 
