@@ -1172,39 +1172,6 @@ def main() -> None:
     )
     print(f"  Features: {len(feature_names)} kept, {len(dropped)} dropped (unavailable at inference)")
 
-    # Add interaction features between top predictors
-    interactions = [
-        ("trend", "resolution_proximity"),
-        ("trend", "spread_pct"),
-        ("mid", "resolution_proximity"),
-        ("trend_pct", "volume_oi_ratio"),
-    ]
-    new_cols_train = []
-    new_cols_val = []
-    new_cols_test = []
-    new_names = []
-    for f1, f2 in interactions:
-        if f1 in feature_names and f2 in feature_names:
-            i1, i2 = feature_names.index(f1), feature_names.index(f2)
-            new_cols_train.append(split.train_X[:, i1] * split.train_X[:, i2])
-            new_cols_val.append(split.val_X[:, i1] * split.val_X[:, i2])
-            new_cols_test.append(split.test_X[:, i1] * split.test_X[:, i2])
-            new_names.append(f"{f1}_x_{f2}")
-    if new_cols_train:
-        split = WalkForwardSplit(
-            train_X=np.column_stack([split.train_X, *[c.reshape(-1, 1) for c in new_cols_train]]),
-            train_y=split.train_y,
-            val_X=np.column_stack([split.val_X, *[c.reshape(-1, 1) for c in new_cols_val]]),
-            val_y=split.val_y,
-            test_X=np.column_stack([split.test_X, *[c.reshape(-1, 1) for c in new_cols_test]]),
-            test_y=split.test_y,
-            train_market_ids=split.train_market_ids,
-            val_market_ids=split.val_market_ids,
-            test_market_ids=split.test_market_ids,
-        )
-        feature_names = feature_names + new_names
-        print(f"  Added {len(new_names)} interaction features: {new_names}")
-
     print(f"  Label balance: {split.train_y.mean():.2%} positive (train)")
     print(f"  Train: {split.train_X.shape[0]} samples ({len(set(split.train_market_ids))} markets)")
     print(f"  Val:   {split.val_X.shape[0]} samples ({len(set(split.val_market_ids))} markets)")
