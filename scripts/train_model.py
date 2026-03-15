@@ -346,7 +346,6 @@ def train_xgboost(
     dval = xgb.DMatrix(val_scaled, label=val_y)
 
     params = {
-        "tree_method": "hist",
         "objective": "binary:logistic",
         "eval_metric": "logloss",
         "eta": 0.02,
