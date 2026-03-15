@@ -243,19 +243,31 @@ def _stratified_market_sample(
     elif split == "test":
         split_filter = "AND m.resolution_ts >= '2026-01-01'"
 
-    rows = conn.execute(
+    # Two-phase approach to avoid GROUP BY on 68M rows (63s → <1s):
+    # Phase 1: Get candidate market_ids from small tables (markets + resolutions)
+    candidates = conn.execute(
         f"""
-        SELECT ms.market_id, COUNT(*) as cnt,
-               MIN(ms.ts) as first_ts, MAX(ms.ts) as last_ts
-        FROM market_snapshots ms
-        JOIN market_resolutions mr ON mr.market_id = ms.market_id
-        JOIN markets m ON m.market_id = ms.market_id
+        SELECT m.market_id
+        FROM markets m
+        JOIN market_resolutions mr ON mr.market_id = m.market_id
         {("WHERE 1=1 " + split_filter) if split_filter else ""}
-        GROUP BY ms.market_id
-        HAVING cnt >= ? AND cnt <= ?
         """,
-        (min_snapshots, max_snapshots),
     ).fetchall()
+    candidate_ids = [str(r["market_id"]) for r in candidates]
+
+    if not candidate_ids:
+        return []
+
+    # Phase 2: Get snapshot counts via indexed lookups (much faster than GROUP BY)
+    rows = []
+    for mid in candidate_ids:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt, MIN(ts) as first_ts, MAX(ts) as last_ts FROM market_snapshots WHERE market_id = ?",
+            (mid,),
+        ).fetchone()
+        cnt = int(row["cnt"])
+        if min_snapshots <= cnt <= max_snapshots:
+            rows.append({"market_id": mid, "cnt": cnt, "first_ts": row["first_ts"], "last_ts": row["last_ts"]})
 
     if not rows:
         return []
@@ -642,6 +654,7 @@ def _run_all_strategies_experiment(
     grok.experiment_id = experiment_id
     grok.context_builder.experiment_id = experiment_id
     grok.context_builder.skip_audit = skip_audit
+    grok.context_builder.skip_related_markets = skip_audit  # skip related markets when skipping audit (eval mode)
 
     engine = ReplayEngine(
         conn=conn,
