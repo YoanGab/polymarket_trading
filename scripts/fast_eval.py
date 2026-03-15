@@ -44,9 +44,7 @@ def predict_model(model: object, X: np.ndarray) -> np.ndarray:
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
         raw = model["xgb_model"].predict(dmat)
-        if "calibrators" in model:
-            raw = np.mean([c.transform(raw) for c in model["calibrators"]], axis=0)
-        elif "calibrator" in model:
+        if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         if "platt" in model:
             raw = model["platt"].predict_proba(raw.reshape(-1, 1))[:, 1]
@@ -174,31 +172,8 @@ def main():
     model_feature_names = model_data["feature_names"]
 
     # Filter val features to match model's expected features
-    # Compute interaction features if needed
-    interaction_defs = {
-        "trend_x_resolution_proximity": ("trend", "resolution_proximity"),
-        "trend_x_spread_pct": ("trend", "spread_pct"),
-        "mid_x_resolution_proximity": ("mid", "resolution_proximity"),
-        "trend_pct_x_volume_oi_ratio": ("trend_pct", "volume_oi_ratio"),
-    }
-    extra_cols = []
-    extra_names = []
-    for name, (f1, f2) in interaction_defs.items():
-        if name in model_feature_names and f1 in all_feature_names and f2 in all_feature_names:
-            i1 = all_feature_names.index(f1)
-            i2 = all_feature_names.index(f2)
-            extra_cols.append(X_val[:, i1] * X_val[:, i2])
-            extra_names.append(name)
-
-    if extra_cols:
-        X_val_ext = np.column_stack([X_val, *[c.reshape(-1, 1) for c in extra_cols]])
-        all_feature_names_ext = all_feature_names + extra_names
-    else:
-        X_val_ext = X_val
-        all_feature_names_ext = all_feature_names
-
-    keep_idx = [all_feature_names_ext.index(f) for f in model_feature_names if f in all_feature_names_ext]
-    X_val_filtered = X_val_ext[:, keep_idx]
+    keep_idx = [all_feature_names.index(f) for f in model_feature_names if f in all_feature_names]
+    X_val_filtered = X_val[:, keep_idx]
 
     # Predict
     predictions = predict_model(model, X_val_filtered)

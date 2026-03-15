@@ -369,22 +369,20 @@ def train_xgboost(
         verbose_eval=False,
     )
 
-    # Multi-seed isotonic calibration: average 3 calibrators for stability
+    # Isotonic calibration on held-out portion of training data
     from sklearn.isotonic import IsotonicRegression
 
     cal_size = min(len(train_y) // 10, 500000)
-    calibrators = []
-    for seed in [42, 123, 7]:
-        rng = np.random.RandomState(seed)
-        cal_idx = rng.choice(len(train_y), cal_size, replace=False)
-        cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
-        cal_labels = train_y[cal_idx]
-        cal = IsotonicRegression(y_min=0.001, y_max=0.999, out_of_bounds="clip")
-        cal.fit(cal_preds, cal_labels)
-        calibrators.append(cal)
-    print(f"  XGBoost: multi-seed isotonic calibration (3 seeds, {cal_size} samples each)")
+    rng = np.random.RandomState(42)
+    cal_idx = rng.choice(len(train_y), cal_size, replace=False)
+    cal_preds = model.predict(xgb.DMatrix(X_scaled[cal_idx]))
+    cal_labels = train_y[cal_idx]
 
-    return {"xgb_model": model, "scaler": scaler, "calibrators": calibrators}
+    calibrator = IsotonicRegression(y_min=0.001, y_max=0.999, out_of_bounds="clip")
+    calibrator.fit(cal_preds, cal_labels)
+    print(f"  XGBoost: isotonic calibration on {cal_size} train samples")
+
+    return {"xgb_model": model, "scaler": scaler, "calibrator": calibrator}
 
 
 def train_catboost(
@@ -1005,9 +1003,7 @@ def predict(model: object, X: np.ndarray) -> np.ndarray:
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
         raw = model["xgb_model"].predict(dmat)
-        if "calibrators" in model:
-            raw = np.mean([c.transform(raw) for c in model["calibrators"]], axis=0)
-        elif "calibrator" in model:
+        if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         if "platt" in model:
             raw = model["platt"].predict_proba(raw.reshape(-1, 1))[:, 1]

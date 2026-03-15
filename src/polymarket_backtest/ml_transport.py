@@ -150,9 +150,7 @@ def _predict_model(model: object, X: np.ndarray) -> np.ndarray:
         X_scaled = model["scaler"].transform(X)
         dmat = xgb.DMatrix(X_scaled)
         raw = model["xgb_model"].predict(dmat)
-        if "calibrators" in model:
-            raw = np.mean([c.transform(raw) for c in model["calibrators"]], axis=0)
-        elif "calibrator" in model:
+        if "calibrator" in model:
             raw = model["calibrator"].transform(raw)
         if "platt" in model:
             raw = model["platt"].predict_proba(raw.reshape(-1, 1))[:, 1]
