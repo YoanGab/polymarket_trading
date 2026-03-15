@@ -282,11 +282,22 @@ def _derive_domain(market: MarketDict) -> str:
     return "general"
 
 
+def _stringify_identifier(candidate: Any) -> str | None:
+    if isinstance(candidate, bool):
+        return None
+    if isinstance(candidate, str):
+        normalized = candidate.strip()
+        return normalized or None
+    if isinstance(candidate, int):
+        return str(candidate)
+    return None
+
+
 def _extract_event_id(market: MarketDict) -> str | None:
     for key in ("event_id", "eventId"):
-        candidate = market.get(key)
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+        event_id = _stringify_identifier(market.get(key))
+        if event_id is not None:
+            return event_id
 
     events = market.get("events")
     if not isinstance(events, list):
@@ -296,9 +307,9 @@ def _extract_event_id(market: MarketDict) -> str | None:
         if not isinstance(event, dict):
             continue
         for key in ("id", "event_id", "eventId", "slug"):
-            candidate = event.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
+            event_id = _stringify_identifier(event.get(key))
+            if event_id is not None:
+                return event_id
     return None
 
 

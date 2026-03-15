@@ -346,6 +346,7 @@ def run_grid_search(
     n_workers: int = 1,
     transport_mode: str | None = None,
     seed: int = 42,
+    allow_holdout: bool = False,
 ) -> list[dict[str, Any]]:
     """Run a grid search across strategies.
 
@@ -362,6 +363,8 @@ def run_grid_search(
             0 = auto (cpu_count). Values > 1 enable multiprocessing.
         transport_mode: Transport mode string for parallel workers (e.g. "smart_rules").
             Required when n_workers != 1. Ignored in sequential mode.
+        allow_holdout: If True, allow evaluation on the holdout split.
+            Only set this via --final-eval.
     """
     selected_strategies = expanded_strategy_grid() if strategies is None else strategies
     if not selected_strategies:
@@ -380,7 +383,9 @@ def run_grid_search(
         # Determine which market IDs to replay (stratified random sampling)
         market_ids: list[str] | None = None
         if max_markets is not None:
-            market_ids = _stratified_market_sample(conn, max_markets, split=split, seed=seed)
+            market_ids = _stratified_market_sample(
+                conn, max_markets, split=split, seed=seed, allow_holdout=allow_holdout
+            )
             if not market_ids:
                 raise ValueError(f"No market data found in {db_path}")
 

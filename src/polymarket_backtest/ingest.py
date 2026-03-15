@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -76,8 +77,11 @@ def ingest_gamma_markets(conn: sqlite3.Connection, raw_markets: list[dict[str, A
             }
         )
 
+    inserted_markets = bulk_add_markets(conn, market_rows) if market_rows else 0
+    _backfill_gamma_market_metadata(conn, parsed_markets)
+
     return {
-        "markets": bulk_add_markets(conn, market_rows) if market_rows else 0,
+        "markets": inserted_markets,
         "resolutions": bulk_add_resolutions(conn, resolution_rows) if resolution_rows else 0,
     }
 
@@ -125,6 +129,51 @@ def _parse_gamma_markets(raw_markets: list[dict[str, Any]]) -> list[dict[str, An
         if parsed is not None:
             parsed_markets.append(parsed)
     return parsed_markets
+
+
+def _backfill_gamma_market_metadata(
+    conn: sqlite3.Connection,
+    parsed_markets: list[dict[str, Any]],
+) -> None:
+    metadata_rows: list[tuple[str | None, str | None, str, str, str]] = []
+    for parsed in parsed_markets:
+        market_id = parsed.get("market_id")
+        if not isinstance(market_id, str) or not market_id:
+            continue
+
+        raw_event_id = parsed.get("event_id")
+        event_id = raw_event_id.strip() if isinstance(raw_event_id, str) and raw_event_id.strip() else None
+
+        raw_tags = parsed.get("tags")
+        tags = raw_tags if isinstance(raw_tags, list) else []
+        tags_json = json.dumps(tags, ensure_ascii=True, sort_keys=True) if tags else "[]"
+
+        if event_id is None and tags_json == "[]":
+            continue
+
+        metadata_rows.append((event_id, event_id, tags_json, tags_json, market_id))
+
+    if not metadata_rows:
+        return
+
+    conn.executemany(
+        """
+        UPDATE markets
+        SET
+            event_id = CASE
+                WHEN ? IS NOT NULL AND NULLIF(TRIM(event_id), '') IS NULL THEN ?
+                ELSE event_id
+            END,
+            tags_json = CASE
+                WHEN ? != '[]' AND (tags_json IS NULL OR NULLIF(TRIM(tags_json), '') IS NULL OR tags_json = '[]')
+                    THEN ?
+                ELSE tags_json
+            END
+        WHERE market_id = ?
+        """,
+        metadata_rows,
+    )
+    conn.commit()
 
 
 def _fetch_market_open_timestamps(
