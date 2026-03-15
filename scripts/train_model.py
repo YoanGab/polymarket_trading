@@ -499,25 +499,28 @@ def train_pytorch_residual(
     val_X: np.ndarray,
     val_y: np.ndarray,
 ) -> object:
-    """Residual network: skip connections help gradient flow in deeper nets."""
+    """Residual network on MPS (Apple Silicon GPU) with mini-batch training."""
     import torch
     from sklearn.preprocessing import StandardScaler
     from torch_models import TabularResNet
+
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"  Using device: {device}", flush=True)
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(train_X)
     X_val = scaler.transform(val_X)
 
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    y_train_t = torch.tensor(train_y, dtype=torch.float32).unsqueeze(1)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32)
-    y_val_t = torch.tensor(val_y, dtype=torch.float32).unsqueeze(1)
+    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
+    y_train_t = torch.tensor(train_y, dtype=torch.float32).unsqueeze(1).to(device)
+    X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
+    y_val_t = torch.tensor(val_y, dtype=torch.float32).unsqueeze(1).to(device)
 
     n_features = X_train.shape[1]
 
     torch.manual_seed(42)
     np.random.seed(42)
-    model = TabularResNet(n_features)
+    model = TabularResNet(n_features).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.02)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
     criterion = torch.nn.BCEWithLogitsLoss()
@@ -526,15 +529,24 @@ def train_pytorch_residual(
     best_state = None
     patience = 30
     no_improve = 0
+    batch_size = 8192
 
     for epoch in range(300):
         model.train()
-        logits = model(X_train_t)
-        loss = criterion(logits, y_train_t * 0.95 + 0.025)  # label smoothing
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        # Mini-batch training for large datasets
+        perm = torch.randperm(len(X_train_t), device=device)
+        total_loss = 0.0
+        n_batches = 0
+        for i in range(0, len(X_train_t), batch_size):
+            idx = perm[i : i + batch_size]
+            logits = model(X_train_t[idx])
+            loss = criterion(logits, y_train_t[idx] * 0.95 + 0.025)
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            total_loss += loss.item()
+            n_batches += 1
         scheduler.step()
 
         model.eval()
@@ -543,13 +555,14 @@ def train_pytorch_residual(
             val_loss = criterion(val_logits, y_val_t)
             if val_loss.item() < best_val_loss:
                 best_val_loss = val_loss.item()
-                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
                 no_improve = 0
             else:
                 no_improve += 1
                 if no_improve >= patience:
                     break
 
+    model.cpu()
     model.load_state_dict(best_state)  # type: ignore[arg-type]
     model.eval()
     print(f"  ResNet: stopped at epoch {epoch + 1}, best val_loss={best_val_loss:.6f}")
