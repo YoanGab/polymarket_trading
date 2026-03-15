@@ -197,10 +197,12 @@ class DQNAgent:
 def train(
     n_episodes: int = 500,
     max_steps: int = 500,
-    max_markets: int = 100,
+    max_markets: int = 500,
     eval_every: int = 50,
+    split: str = "train",
+    eval_only: bool = False,
 ):
-    env = make_env(max_markets=max_markets, split="val")
+    env = make_env(max_markets=max_markets, split=split)
 
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
@@ -220,11 +222,18 @@ def train(
         ep_trades = 0
 
         for step in range(max_steps):
-            action = agent.select_action(obs)
+            if eval_only:
+                # Greedy action, no exploration
+                with agent.torch.no_grad():
+                    state_t = agent.torch.tensor(obs, dtype=agent.torch.float32).unsqueeze(0)
+                    action = int(agent.q_net(state_t).argmax(dim=1).item())
+            else:
+                action = agent.select_action(obs)
             next_obs, reward, terminated, truncated, info = env.step(action)
 
-            agent.store(obs, action, reward, next_obs, terminated or truncated)
-            loss = agent.train_step()
+            if not eval_only:
+                agent.store(obs, action, reward, next_obs, terminated or truncated)
+                agent.train_step()
 
             ep_return += reward
             if info.get("filled_quantity", 0) > 0:
@@ -276,8 +285,12 @@ def main():
     parser = argparse.ArgumentParser(description="Train RL agent")
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--max-steps", type=int, default=500)
-    parser.add_argument("--max-markets", type=int, default=100)
+    parser.add_argument("--max-markets", type=int, default=500)
     parser.add_argument("--eval-every", type=int, default=50)
+    parser.add_argument(
+        "--split", default="train", help="Split to use: 'train' for training, 'val' for evaluation (default: train)"
+    )
+    parser.add_argument("--eval-only", action="store_true", help="Evaluate only (no learning). Use with --split val.")
     args = parser.parse_args()
 
     train(
@@ -285,6 +298,8 @@ def main():
         max_steps=args.max_steps,
         max_markets=args.max_markets,
         eval_every=args.eval_every,
+        split=args.split,
+        eval_only=args.eval_only,
     )
 
 
