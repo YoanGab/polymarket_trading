@@ -161,7 +161,22 @@ Once the loop begins, do NOT pause. The human may be asleep. Continue working au
 - **50 category tags** available as features
 - **720h lookback** for temporal features
 - **12 action types** in the environment
+- **Two gym environments**: `PolymarketGymEnv` (single market, Discrete(12)) and `PolymarketMultiMarketGymEnv` (N markets simultaneous, MultiDiscrete, shared cash)
 - **Cross-market correlation** via event_id (33K events)
 - **Category routing** (political, crypto, sports — each with different dynamics and fees)
 - **Production guards** (staleness, drawdown, distribution shift)
 - **600x eval speedup** (stride + pre-load + skip audit)
+
+## Hardware and acceleration
+
+- **Apple Silicon Mac** with 128GB unified memory
+- **MLX** (Apple's ML framework) is available for GPU-accelerated training on Apple Silicon. Consider using it when the neural network becomes the bottleneck (large models, Transformer/LSTM on long sequences). Library: `mlx` + `rlx` (CleanRL-inspired RL on MLX). Install: `uv add mlx`.
+- **PyTorch MPS** backend also works on Apple Silicon (slightly slower than MLX for most workloads).
+- **Current bottleneck** is data loading / feature computation, NOT the neural network. Focus on data pipeline speed first. Switch to MLX/GPU only when the model becomes the bottleneck.
+
+## Research tools
+
+- **Perplexity** (`mcp__perplexity-ask__perplexity_ask`): Use for researching best practices, library docs, algorithm comparisons. Example: "What is the best RL algorithm for financial trading?" or "How to implement prioritized experience replay in MLX?"
+- **Firecrawl** (`mcp__Firecrawl__firecrawl_search`): Use for scraping documentation, GitHub repos, papers.
+- **Context7** (`mcp__plugin_context7_context7__resolve-library-id`): Use for library-specific documentation (PyTorch, MLX, gymnasium, etc.)
+- You are encouraged to research before implementing. Don't guess — look up the best approach.
