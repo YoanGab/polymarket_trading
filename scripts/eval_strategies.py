@@ -75,6 +75,12 @@ def main() -> None:
         default=4,
         help="Evaluate every Nth snapshot per market while preserving the last snapshot (default: 4).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes. 0 = auto (cpu_count), 1 = sequential (default).",
+    )
     args = parser.parse_args()
 
     if not DB_PATH.exists():
@@ -92,6 +98,8 @@ def main() -> None:
         in_memory=not args.no_in_memory,
         split=args.split,
         eval_stride=args.stride,
+        n_workers=args.workers,
+        transport_mode=args.forecast_mode,
     )
     ranked = rank_strategies(results)
     elapsed = time.monotonic() - start

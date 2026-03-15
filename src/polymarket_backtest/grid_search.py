@@ -357,6 +357,8 @@ def run_grid_search(
     exclude_categories: list[str] | None = None,
     split: str | None = None,
     eval_stride: int = 4,
+    n_workers: int = 1,
+    transport_mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run a grid search across strategies.
 
@@ -369,10 +371,20 @@ def run_grid_search(
         max_markets: Limit the number of markets used (for faster iteration).
         in_memory: Copy the DB into RAM before replaying.  Eliminates all
             disk I/O during the replay.  Requires ~2-3 GB RAM.  Defaults to True.
+        n_workers: Number of parallel worker processes. 1 = sequential (default),
+            0 = auto (cpu_count). Values > 1 enable multiprocessing.
+        transport_mode: Transport mode string for parallel workers (e.g. "smart_rules").
+            Required when n_workers != 1. Ignored in sequential mode.
     """
     selected_strategies = expanded_strategy_grid() if strategies is None else strategies
     if not selected_strategies:
         return []
+
+    # For parallel mode, we need a disk-based DB (workers read from disk via WAL)
+    use_parallel = n_workers != 1
+    if use_parallel:
+        in_memory = False  # Workers read from disk
+
     conn = _open_execution_db(db_path, in_memory=in_memory)
     try:
         db.init_db(conn)
@@ -413,18 +425,34 @@ def run_grid_search(
                 ]
                 print(f"  Category filter: {len(all_ids)} → {len(market_ids)} markets (excluded {exclude_set})")
 
-        # Single-pass: run ALL strategies in one ReplayEngine pass.
-        # The engine processes each market event once and applies all strategies,
-        # avoiding 13x redundant forecast computation and DB reads.
-        experiment_id, summary = _run_all_strategies_experiment(
-            conn,
-            strategies=selected_strategies,
-            starting_cash=starting_cash,
-            transport_factory=transport_factory,
-            market_ids=market_ids,
-            eval_stride=eval_stride,
-            skip_audit=True,
-        )
+        # Use parallel path when requested and we have market_ids
+        if use_parallel and market_ids is not None and len(market_ids) > 1:
+            from .parallel_eval import run_parallel_grid_search
+
+            resolved_mode = transport_mode or "smart_rules"
+            experiment_id, summary = run_parallel_grid_search(
+                db_path,
+                conn,
+                strategies=selected_strategies,
+                starting_cash=starting_cash,
+                transport_mode=resolved_mode,
+                market_ids=market_ids,
+                eval_stride=eval_stride,
+                n_workers=n_workers,
+            )
+        else:
+            # Single-pass: run ALL strategies in one ReplayEngine pass.
+            # The engine processes each market event once and applies all strategies,
+            # avoiding 13x redundant forecast computation and DB reads.
+            experiment_id, summary = _run_all_strategies_experiment(
+                conn,
+                strategies=selected_strategies,
+                starting_cash=starting_cash,
+                transport_factory=transport_factory,
+                market_ids=market_ids,
+                eval_stride=eval_stride,
+                skip_audit=True,
+            )
         results: list[dict[str, Any]] = []
         for strategy in selected_strategies:
             results.append(_extract_strategy_result(conn, experiment_id, strategy.name, summary))
