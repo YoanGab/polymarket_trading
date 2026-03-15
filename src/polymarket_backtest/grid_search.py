@@ -33,101 +33,51 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
     sports_only = list(SPORTS_CATEGORY_TAGS)
 
     return [
-        # Fee-free political/event markets: conservative sizing, require strong edge.
+        # Edge-based: all categories, conservative sizing, strong edge required
         StrategyConfig(
-            name="political_event_wide",
-            family="resolution_convergence",
-            kelly_fraction=0.20,
-            edge_threshold_bps=200.0,
-            max_position_notional=800.0,
-            max_holding_minutes=None,
-            resolution_hours_max=2160.0,
-            min_confidence=0.70,
-            extreme_low=0.25,
-            extreme_high=0.80,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-            blocked_categories=fee_free_blocklist,
-        ),
-        StrategyConfig(
-            name="political_event_core",
-            family="resolution_convergence",
-            kelly_fraction=0.25,
-            edge_threshold_bps=150.0,
-            max_position_notional=1000.0,
-            max_holding_minutes=None,
-            resolution_hours_max=720.0,
-            min_confidence=0.70,
-            extreme_low=0.30,
-            extreme_high=0.70,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.10,
-            blocked_categories=fee_free_blocklist,
-        ),
-        StrategyConfig(
-            name="political_event_conviction",
+            name="edge_conservative",
             family="edge_based",
-            kelly_fraction=0.20,
-            edge_threshold_bps=250.0,
-            max_position_notional=800.0,
-            max_holding_minutes=20160,
-            min_confidence=0.75,
+            kelly_fraction=0.15,
+            edge_threshold_bps=200.0,
+            max_position_notional=600.0,
+            max_holding_minutes=10080,  # 7 days
+            min_confidence=0.70,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
-            aggressive_entry=True,
-            blocked_categories=fee_free_blocklist,
         ),
-        # Crypto markets: shorter windows and higher edge requirements to absorb 25 bps fees.
+        # Edge-based: moderate threshold for more trades
         StrategyConfig(
-            name="crypto_resolution_day",
-            family="resolution_convergence",
-            kelly_fraction=0.25,
-            edge_threshold_bps=200.0,
-            max_position_notional=900.0,
-            max_holding_minutes=None,
-            resolution_hours_max=24.0,
-            min_confidence=0.72,
-            extreme_low=0.35,
-            extreme_high=0.65,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.06,
-            allowed_categories=crypto_only,
-        ),
-        StrategyConfig(
-            name="crypto_resolution_6h",
-            family="resolution_convergence",
-            kelly_fraction=0.20,
-            edge_threshold_bps=300.0,
-            max_position_notional=750.0,
-            max_holding_minutes=None,
-            resolution_hours_max=6.0,
-            min_confidence=0.74,
-            extreme_low=0.40,
-            extreme_high=0.60,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.05,
-            allowed_categories=crypto_only,
-        ),
-        StrategyConfig(
-            name="crypto_edge_fast",
+            name="edge_moderate",
             family="edge_based",
-            kelly_fraction=0.20,
-            edge_threshold_bps=225.0,
-            max_position_notional=700.0,
-            max_holding_minutes=240,
-            min_confidence=0.78,
+            kelly_fraction=0.10,
+            edge_threshold_bps=100.0,
+            max_position_notional=400.0,
+            max_holding_minutes=4320,  # 3 days
+            min_confidence=0.68,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.08,
+        ),
+        # Sports-only: fast resolution, lower threshold
+        StrategyConfig(
+            name="sports_edge",
+            family="edge_based",
+            kelly_fraction=0.15,
+            edge_threshold_bps=100.0,
+            max_position_notional=600.0,
+            max_holding_minutes=1440,  # 1 day
+            min_confidence=0.68,
             use_thesis_stop=True,
             thesis_stop_delta=0.08,
             aggressive_entry=True,
-            allowed_categories=crypto_only,
+            allowed_categories=sports_only,
         ),
-        # Sports markets: fast resolution and tighter exposure limits.
+        # Resolution convergence: sports only (where it works)
         StrategyConfig(
-            name="sports_resolution_day",
+            name="sports_resolution",
             family="resolution_convergence",
-            kelly_fraction=0.25,
-            edge_threshold_bps=90.0,
-            max_position_notional=800.0,
+            kelly_fraction=0.20,
+            edge_threshold_bps=100.0,
+            max_position_notional=700.0,
             max_holding_minutes=None,
             resolution_hours_max=24.0,
             min_confidence=0.68,
@@ -135,34 +85,6 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             extreme_high=0.65,
             use_thesis_stop=True,
             thesis_stop_delta=0.07,
-            allowed_categories=sports_only,
-        ),
-        StrategyConfig(
-            name="sports_resolution_6h",
-            family="resolution_convergence",
-            kelly_fraction=0.20,
-            edge_threshold_bps=140.0,
-            max_position_notional=700.0,
-            max_holding_minutes=None,
-            resolution_hours_max=6.0,
-            min_confidence=0.70,
-            extreme_low=0.40,
-            extreme_high=0.60,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.05,
-            allowed_categories=sports_only,
-        ),
-        StrategyConfig(
-            name="sports_edge_fast",
-            family="edge_based",
-            kelly_fraction=0.15,
-            edge_threshold_bps=120.0,
-            max_position_notional=600.0,
-            max_holding_minutes=180,
-            min_confidence=0.72,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.08,
-            aggressive_entry=True,
             allowed_categories=sports_only,
         ),
     ]
@@ -228,26 +150,24 @@ def _stratified_market_sample(
     elif split == "holdout":
         split_filter = f"AND m.resolution_ts >= '{HOLDOUT_CUTOFF}'"
 
-    # Fast random sampling from candidate markets (no per-market snapshot queries)
+    # Get all candidate market_ids, then sample deterministically with seed
     candidates = conn.execute(
         f"""
         SELECT m.market_id
         FROM markets m
         JOIN market_resolutions mr ON mr.market_id = m.market_id
         {("WHERE 1=1 " + split_filter) if split_filter else ""}
-        ORDER BY RANDOM()
-        LIMIT ?
+        ORDER BY m.market_id
         """,
-        (max_markets,),
     ).fetchall()
-    selected = [str(r["market_id"]) for r in candidates]
+    all_ids = [str(r["market_id"]) for r in candidates]
 
-    if not selected:
+    if not all_ids:
         return []
 
     rng = random.Random(seed)
-    rng.shuffle(selected)
-    return selected
+    rng.shuffle(all_ids)
+    return all_ids[:max_markets]
 
 
 def _open_execution_db(db_path: Path, *, in_memory: bool) -> sqlite3.Connection:
