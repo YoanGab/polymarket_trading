@@ -349,7 +349,9 @@ def train_xgboost(
         "objective": "binary:logistic",
         "eval_metric": "logloss",
         "eta": 0.02,
-        "max_depth": 6,
+        "max_depth": 0,  # unlimited depth for lossguide
+        "max_leaves": 64,
+        "grow_policy": "lossguide",
         "min_child_weight": 200,
         "subsample": 0.5,
         "colsample_bytree": 0.3,
