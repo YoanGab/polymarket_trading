@@ -69,7 +69,7 @@ class MarketSimulator:
     # order book typically has slightly different depth/spread than what we
     # get from complement pricing (NO = 1 - YES).  This widens the
     # simulated NO spread to be more conservative.  Set to 0 to disable.
-    no_spread_penalty_bps: float = 10.0
+    no_spread_penalty_bps: float = 0.0  # Polymarket mirrors YES/NO liquidity, spreads identical by design
 
     def simulate(
         self,
