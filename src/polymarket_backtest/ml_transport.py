@@ -39,6 +39,61 @@ class MLModelTransport:
         self._model = data["model"]
         self._feature_names: list[str] = data["feature_names"]
 
+        # Try to load GRU model for blending (optional)
+        self._gru_model = None
+        self._gru_blend_weight = 0.12  # 88% XGBoost + 12% GRU
+        gru_path = MODELS_DIR.parent / "data" / "prepared" / "gru_model.pt"
+        if gru_path.exists():
+            try:
+                import torch
+
+                checkpoint = torch.load(gru_path, weights_only=False)
+                from polymarket_backtest.features import (  # noqa: F811
+                    extract_snapshot_features as _esf,
+                )
+
+                # Store GRU model and scaler for inference
+                class _SimpleGRU:
+                    def __init__(self, state_dict, scaler_mean, scaler_scale, n_features):
+                        import torch.nn as nn
+                        from torch.nn.utils.rnn import pack_padded_sequence
+
+                        self.gru = nn.GRU(n_features, 32, 1, batch_first=True)
+                        self.head = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Dropout(0.1), nn.Linear(32, 1))
+                        # Load only matching keys
+                        self.gru.load_state_dict(
+                            {k.replace("gru.", ""): v for k, v in state_dict.items() if k.startswith("gru.")}
+                        )
+                        self.head.load_state_dict(
+                            {k.replace("head.", ""): v for k, v in state_dict.items() if k.startswith("head.")}
+                        )
+                        self.gru.eval()
+                        self.head.eval()
+                        self.scaler_mean = scaler_mean
+                        self.scaler_scale = scaler_scale
+
+                    def predict_proba(self, features_sequence):
+                        import torch
+
+                        scaled = (features_sequence - self.scaler_mean) / self.scaler_scale
+                        x = torch.tensor(scaled, dtype=torch.float32).unsqueeze(0)
+                        length = torch.tensor([len(scaled)], dtype=torch.long)
+                        packed = pack_padded_sequence(x, length.cpu(), batch_first=True, enforce_sorted=False)
+                        _, hidden = self.gru(packed)
+                        logit = self.head(hidden[-1]).squeeze()
+                        return float(torch.sigmoid(logit).item())
+
+                n_features = len(checkpoint.get("scaler_mean", []))
+                if n_features > 0:
+                    self._gru_model = _SimpleGRU(
+                        checkpoint["state_dict"],
+                        checkpoint["scaler_mean"],
+                        checkpoint["scaler_scale"],
+                        n_features,
+                    )
+            except Exception:
+                self._gru_model = None  # GRU loading failed, use XGBoost only
+
     def complete(
         self,
         *,
@@ -74,8 +129,34 @@ class MLModelTransport:
         )
         feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=1e6, neginf=-1e6)
 
-        # Predict
-        probability = self._predict(feature_vector)[0]
+        # Predict (XGBoost)
+        xgb_probability = self._predict(feature_vector)[0]
+
+        # Blend with GRU if available
+        if self._gru_model is not None and prev_rows:
+            try:
+                # Build feature sequence from prev_snapshots + current
+                seq_features = []
+                for pr in prev_rows[-128:]:  # max 128 snapshots
+                    f = extract_snapshot_features(pr, [])
+                    for name in self._feature_names:
+                        if name.startswith("tag_"):
+                            f[name] = features.get(name, 0.0)
+                    if "n_tags" in self._feature_names:
+                        f["n_tags"] = features.get("n_tags", 0.0)
+                    vec = [f.get(n, 0.0) for n in self._feature_names]
+                    seq_features.append(vec)
+                # Add current snapshot
+                seq_features.append([features.get(n, 0.0) for n in self._feature_names])
+                seq_arr = np.array(seq_features, dtype=np.float32)
+                seq_arr = np.nan_to_num(seq_arr, nan=0.0, posinf=1e6, neginf=-1e6)
+                gru_prob = self._gru_model.predict_proba(seq_arr)
+                probability = (1 - self._gru_blend_weight) * xgb_probability + self._gru_blend_weight * gru_prob
+            except Exception:
+                probability = xgb_probability
+        else:
+            probability = xgb_probability
+
         probability = float(np.clip(probability, 0.005, 0.995))
 
         edge_bps = round((probability - best_ask) * 10_000.0, 2)
