@@ -29,13 +29,34 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "polymarket_backtest
 
 def make_env(max_markets: int = 100, split: str = "val"):
     """Create the Polymarket gym environment."""
+    import sqlite3
+
     from polymarket_backtest.gym_env import PolymarketGymEnv
+    from polymarket_backtest.splits import TRAIN_CUTOFF, VAL_CUTOFF
+
+    # Pre-select market_ids for the split
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    split_filter = {
+        "train": f"m.resolution_ts < '{TRAIN_CUTOFF}'",
+        "val": f"m.resolution_ts >= '{TRAIN_CUTOFF}' AND m.resolution_ts < '{VAL_CUTOFF}'",
+        "test": f"m.resolution_ts >= '{VAL_CUTOFF}'",
+    }
+    filt = split_filter.get(split, split_filter["val"])
+    rows = conn.execute(
+        f"SELECT m.market_id FROM markets m "
+        f"JOIN market_resolutions mr ON mr.market_id = m.market_id "
+        f"WHERE {filt} ORDER BY RANDOM() LIMIT ?",
+        (max_markets,),
+    ).fetchall()
+    conn.close()
+    market_ids = [str(r["market_id"]) for r in rows]
 
     return PolymarketGymEnv(
         db_path=str(DB_PATH),
         starting_cash=1000,
+        market_ids=market_ids,
         split=split,
-        max_markets=max_markets,
     )
 
 
