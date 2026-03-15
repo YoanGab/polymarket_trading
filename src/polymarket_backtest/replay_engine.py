@@ -6,21 +6,26 @@ import uuid
 from bisect import bisect_left
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from . import db
 from .cross_market import CrossMarketTracker
+from .features import MAX_FEATURE_LOOKBACK
 from .grok_replay import ReplayGrokClient
 from .market_categories import category_fee_settings, normalize_market_tags
-from .market_simulator import MarketSimulator, new_order_id
+from .market_simulator import MarketSimulator, PolymarketFeeModel, new_order_id
 from .strategies import StrategyEngine
 from .types import (
+    AmendOrderAction,
+    CancelOrderAction,
     FillResult,
     MarketState,
+    OrderIntent,
     OrderLevel,
     PositionState,
     ReplayConfig,
+    RestingOrder,
     StrategyConfig,
     dc_replace,
     ensure_utc,
@@ -31,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 COMMIT_EVERY = 50
 PROGRESS_EVERY = 50
+SYNTHETIC_BOOK_DEPTH_PER_24H_VOLUME = 2.0757864326109474
+SYNTHETIC_BOOK_DEPTH_CAP = 50_000_000.0
 
 
 def _position_key(market_id: str, is_no_bet: bool = False) -> str:
@@ -41,6 +48,7 @@ def _position_key(market_id: str, is_no_bet: bool = False) -> str:
 class StrategyPortfolio:
     cash: float
     positions: dict[str, PositionState] = field(default_factory=dict)
+    resting_orders: list[RestingOrder] = field(default_factory=list)
     last_known_mids: dict[str, float] = field(default_factory=dict)
     realized_pnl: float = 0.0
     missed_trades: int = 0
@@ -525,6 +533,11 @@ class ReplayEngine:
 
         for strategy in self.strategies:
             portfolio = self.portfolios[strategy.name]
+            self._process_resting_orders(
+                portfolio=portfolio,
+                market=market,
+                forecast=forecast,
+            )
             just_exited = False
             for position_key in (_position_key(market_id), _position_key(market_id, True)):
                 position = portfolio.positions.get(position_key)
@@ -560,6 +573,11 @@ class ReplayEngine:
                 forecast=forecast,
                 position=portfolio.positions.get(_position_key(market_id)),
                 no_position=portfolio.positions.get(_position_key(market_id, True)),
+                resting_orders=[
+                    dc_replace(resting_order)
+                    for resting_order in portfolio.resting_orders
+                    if resting_order.market_id == market_id
+                ],
                 available_cash=self._available_cash_for_entries(portfolio, strategy),
                 portfolio_cash=portfolio.cash,
                 starting_cash=self.config.starting_cash,
@@ -577,16 +595,29 @@ class ReplayEngine:
                 ),
                 related_market_prices=related_market_prices,
             )
-            for order in orders:
-                self._execute_order(
-                    portfolio,
-                    market,
-                    next_market,
-                    order,
-                    entry_probability=(
-                        1.0 - forecast.probability_yes if order.is_no_bet else forecast.probability_yes
-                    ),
-                )
+            for action in orders:
+                if isinstance(action, OrderIntent):
+                    self._execute_order(
+                        portfolio,
+                        market,
+                        next_market,
+                        action,
+                        entry_probability=(
+                            1.0 - forecast.probability_yes if action.is_no_bet else forecast.probability_yes
+                        ),
+                    )
+                elif isinstance(action, CancelOrderAction):
+                    self._cancel_resting_order(
+                        portfolio=portfolio,
+                        order_id=action.order_id,
+                    )
+                elif isinstance(action, AmendOrderAction):
+                    self._amend_resting_order(
+                        portfolio=portfolio,
+                        order_id=action.order_id,
+                        new_price=action.new_price,
+                        new_quantity=action.new_quantity,
+                    )
 
         for strategy in self.strategies:
             portfolio = self.portfolios[strategy.name]
@@ -628,6 +659,7 @@ class ReplayEngine:
         return {
             strategy_name: StrategyPortfolio(
                 cash=portfolio.cash,
+                resting_orders=[dc_replace(resting_order) for resting_order in portfolio.resting_orders],
                 last_known_mids=dict(portfolio.last_known_mids),
                 realized_pnl=portfolio.realized_pnl,
                 missed_trades=portfolio.missed_trades,
@@ -700,12 +732,15 @@ class ReplayEngine:
             return market
 
         tick_size = max(market.tick_size, 0.001)
-        # Synthetic liquidity: derive per-minute volume from volume_1m when
-        # available, otherwise approximate from volume_24h (total daily volume
-        # divided by 1440 minutes).  Scale conservatively at 1% of per-minute
-        # volume so a $1M/day market gets ~7 contracts (capped at 50).
-        per_minute_volume = market.volume_1m if market.volume_1m > 0 else market.volume_24h / 1440.0
-        synthetic_quantity = min(50.0, max(1.0, per_minute_volume * 0.01))
+        # Calibrated from live Polymarket snapshots (2026-03-15): the median
+        # total resting bid size was ~2.0758x 24h notional volume across 99
+        # bid-bearing token books from a 60-market sample. Fall back to a
+        # 1-minute volume estimate only when 24h volume is unavailable.
+        reference_volume_24h = market.volume_24h if market.volume_24h > 0 else market.volume_1m * 1440.0
+        synthetic_quantity = min(
+            SYNTHETIC_BOOK_DEPTH_CAP,
+            max(1.0, reference_volume_24h * SYNTHETIC_BOOK_DEPTH_PER_24H_VOLUME),
+        )
         bid_price = market.best_bid if 0.0 < market.best_bid < 1.0 else max(0.001, market.mid - tick_size / 2.0)
         ask_price = market.best_ask if 0.0 < market.best_ask < 1.0 else min(0.999, market.mid + tick_size / 2.0)
         bid_price = round(max(0.001, min(0.999 - tick_size, bid_price)), 4)

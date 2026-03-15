@@ -73,6 +73,8 @@ class MarketState:
     maker_rebate_rate: float
     orderbook: list[OrderLevel]
     tags: list[str] = field(default_factory=list)
+    outcome_count: int = 2
+    outcome_tokens: list[str] = field(default_factory=list)
 
     @property
     def visible_depth_ask(self) -> float:
@@ -234,6 +236,52 @@ class OrderIntent:
             raise ValueError(f"limit_price must be in [0.001, 0.999], got {self.limit_price}")
         if self.requested_quantity <= 0:
             raise ValueError(f"requested_quantity must be > 0, got {self.requested_quantity}")
+
+
+@dataclass
+class RestingOrder:
+    order_id: str
+    strategy_name: str
+    market_id: str
+    placed_ts: datetime
+    side: Literal["buy", "sell"]
+    limit_price: float
+    remaining_quantity: float
+    is_no_bet: bool = False
+    gtd_expiry: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not (0.001 <= self.limit_price <= 0.999):
+            raise ValueError(f"limit_price must be in [0.001, 0.999], got {self.limit_price}")
+        if self.remaining_quantity <= 0:
+            raise ValueError(f"remaining_quantity must be > 0, got {self.remaining_quantity}")
+
+
+@dataclass(frozen=True)
+class CancelOrderAction:
+    order_id: str
+
+    def __post_init__(self) -> None:
+        if not self.order_id:
+            raise ValueError("order_id must be non-empty")
+
+
+@dataclass(frozen=True)
+class AmendOrderAction:
+    order_id: str
+    new_price: float
+    new_quantity: float
+
+    def __post_init__(self) -> None:
+        if not self.order_id:
+            raise ValueError("order_id must be non-empty")
+        if not (0.001 <= self.new_price <= 0.999):
+            raise ValueError(f"new_price must be in [0.001, 0.999], got {self.new_price}")
+        if self.new_quantity <= 0:
+            raise ValueError(f"new_quantity must be > 0, got {self.new_quantity}")
+
+
+type StrategyAction = OrderIntent | CancelOrderAction | AmendOrderAction
 
 
 @dataclass(frozen=True)

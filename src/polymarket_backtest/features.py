@@ -15,6 +15,9 @@ import numpy as np
 
 from . import db
 
+MOMENTUM_LOOKBACKS = (3, 6, 12, 24, 72, 168)
+MAX_FEATURE_LOOKBACK = 720
+
 
 @dataclass
 class FeatureSet:
@@ -83,19 +86,33 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
         features["log_hours_to_resolution"] = np.log1p(720.0)
         features["resolution_proximity"] = 0.0
 
+    history_defaults = {
+        "volatility_24h": 0.0,
+        "volume_trend": 0.0,
+        "price_range_24h": 0.0,
+        "volatility_168h": 0.0,
+        "price_range_168h": 0.0,
+        "price_vs_mean_168h": 0.0,
+        "price_range_720h": 0.0,
+        "price_vs_mean_720h": 0.0,
+        "distance_to_720h_high": 0.0,
+        "distance_to_720h_low": 0.0,
+    }
+    for lookback in MOMENTUM_LOOKBACKS:
+        history_defaults[f"momentum_{lookback}h"] = 0.0
+        history_defaults[f"momentum_{lookback}h_pct"] = 0.0
+    features.update(history_defaults)
+
     # Momentum from history
     if prev_rows:
         prev_mids = [float(r["mid"]) for r in prev_rows]
 
         # Price change over last N snapshots
-        for lookback in [3, 6, 12, 24]:
+        for lookback in MOMENTUM_LOOKBACKS:
             if len(prev_mids) >= lookback:
                 old_mid = prev_mids[-lookback]
                 features[f"momentum_{lookback}h"] = mid - old_mid
                 features[f"momentum_{lookback}h_pct"] = (mid - old_mid) / max(old_mid, 0.001)
-            else:
-                features[f"momentum_{lookback}h"] = 0.0
-                features[f"momentum_{lookback}h_pct"] = 0.0
 
         # Volatility (std of recent mids)
         recent = prev_mids[-min(24, len(prev_mids)) :]
@@ -112,13 +129,23 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
 
         # Price range (high-low over history)
         features["price_range_24h"] = max(prev_mids[-24:]) - min(prev_mids[-24:]) if len(prev_mids) >= 24 else 0.0
-    else:
-        for lookback in [3, 6, 12, 24]:
-            features[f"momentum_{lookback}h"] = 0.0
-            features[f"momentum_{lookback}h_pct"] = 0.0
-        features["volatility_24h"] = 0.0
-        features["volume_trend"] = 0.0
-        features["price_range_24h"] = 0.0
+
+        if len(prev_mids) >= 168:
+            mids_168 = prev_mids[-168:]
+            features["volatility_168h"] = float(np.std(mids_168))
+            features["price_range_168h"] = max(mids_168) - min(mids_168)
+            mean_168 = float(np.mean(mids_168))
+            features["price_vs_mean_168h"] = mid - mean_168
+
+        if len(prev_mids) >= 720:
+            mids_720 = prev_mids[-720:]
+            high_720 = max(mids_720)
+            low_720 = min(mids_720)
+            features["price_range_720h"] = high_720 - low_720
+            mean_720 = float(np.mean(mids_720))
+            features["price_vs_mean_720h"] = mid - mean_720
+            features["distance_to_720h_high"] = high_720 - mid
+            features["distance_to_720h_low"] = mid - low_720
 
     return features
 
@@ -171,7 +198,7 @@ def build_dataset(db_path: str | Path, snapshot_stride: int = 6) -> FeatureSet:
 
         for idx in sampled_indices:
             row = rows[idx]
-            prev_rows = rows[max(0, idx - 24) : idx]  # up to 24h history
+            prev_rows = rows[max(0, idx - MAX_FEATURE_LOOKBACK) : idx]  # raw hourly history
             features = extract_snapshot_features(row, prev_rows)
 
             all_features.append(features)

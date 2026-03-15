@@ -40,8 +40,7 @@ CREATE TABLE IF NOT EXISTS market_rule_revisions (
 CREATE INDEX IF NOT EXISTS idx_rule_revisions_market_ts
     ON market_rule_revisions (market_id, effective_ts);
 
-CREATE INDEX IF NOT EXISTS idx_markets_event_id
-    ON markets (event_id);
+-- idx_markets_event_id is created by init_db() after migration adds event_id column
 
 CREATE TABLE IF NOT EXISTS market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

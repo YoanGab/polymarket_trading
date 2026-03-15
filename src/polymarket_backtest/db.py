@@ -22,17 +22,20 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    schema = resources.files("polymarket_backtest").joinpath("schema.sql").read_text()
-    conn.executescript(schema)
-    # Migration: add is_synthetic column if missing (for databases created before this change)
+    # Run column migrations BEFORE schema script so that indexes on new columns succeed.
     columns = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)").fetchall()}
-    if "is_synthetic" not in columns:
+    if columns and "is_synthetic" not in columns:
         conn.execute("ALTER TABLE market_snapshots ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0")
     market_columns = {row[1] for row in conn.execute("PRAGMA table_info(markets)").fetchall()}
-    if "event_id" not in market_columns:
-        conn.execute("ALTER TABLE markets ADD COLUMN event_id TEXT")
-    if "tags_json" not in market_columns:
-        conn.execute("ALTER TABLE markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'")
+    if market_columns:
+        if "event_id" not in market_columns:
+            conn.execute("ALTER TABLE markets ADD COLUMN event_id TEXT")
+        if "tags_json" not in market_columns:
+            conn.execute("ALTER TABLE markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'")
+    conn.commit()
+
+    schema = resources.files("polymarket_backtest").joinpath("schema.sql").read_text()
+    conn.executescript(schema)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets (event_id)")
     conn.commit()
 
@@ -100,6 +103,49 @@ def _parse_tags_json(value: Any) -> list[str]:
 
 def _inserted_count(conn: sqlite3.Connection, total_changes_before: int) -> int:
     return conn.total_changes - total_changes_before
+
+
+def get_event_outcome_tokens_map(
+    conn: sqlite3.Connection,
+    market_ids: list[str],
+) -> dict[str, list[str]]:
+    unique_market_ids = list(dict.fromkeys(market_ids))
+    if not unique_market_ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in unique_market_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+            base.market_id AS base_market_id,
+            sibling.market_id AS outcome_market_id
+        FROM markets base
+        JOIN markets sibling
+          ON sibling.event_id = base.event_id
+        WHERE base.market_id IN ({placeholders})
+          AND base.event_id IS NOT NULL
+        ORDER BY
+            base.market_id,
+            CASE WHEN sibling.market_id = base.market_id THEN 0 ELSE 1 END,
+            sibling.title COLLATE NOCASE,
+            sibling.market_id
+        """,
+        tuple(unique_market_ids),
+    ).fetchall()
+
+    outcome_tokens_by_market: dict[str, list[str]] = {}
+    for row in rows:
+        base_market_id = str(row["base_market_id"])
+        outcome_market_id = str(row["outcome_market_id"])
+        outcome_tokens_by_market.setdefault(base_market_id, []).append(outcome_market_id)
+    return outcome_tokens_by_market
+
+
+def get_event_outcome_tokens(
+    conn: sqlite3.Connection,
+    market_id: str,
+) -> list[str]:
+    return list(get_event_outcome_tokens_map(conn, [market_id]).get(market_id, []))
 
 
 def create_experiment(
@@ -499,6 +545,10 @@ def get_market_state_as_of(
     if row is None:
         return None
 
+    event_outcome_tokens = get_event_outcome_tokens(conn, market_id)
+    outcome_tokens = event_outcome_tokens if len(event_outcome_tokens) > 1 else []
+    outcome_count = len(outcome_tokens) if outcome_tokens else 2
+
     rule_row = conn.execute(
         """
         SELECT rules_text, additional_context
@@ -550,6 +600,8 @@ def get_market_state_as_of(
             for level in levels
         ],
         tags=_parse_tags_json(row["tags_json"]),
+        outcome_count=outcome_count,
+        outcome_tokens=outcome_tokens,
     )
 
 
@@ -629,29 +681,54 @@ def get_related_markets_as_of(
     as_of: datetime,
 ) -> list[dict[str, Any]]:
     domain_row = conn.execute(
-        "SELECT domain FROM markets WHERE market_id = ?",
+        "SELECT domain, event_id FROM markets WHERE market_id = ?",
         (market_id,),
     ).fetchone()
     if domain_row is None:
         return []
-    rows = conn.execute(
-        """
-        SELECT m.market_id, m.title, s.mid, s.best_bid, s.best_ask, s.ts
-        FROM markets m
-        JOIN market_snapshots s
-          ON s.market_id = m.market_id
-         AND s.ts = (
-             SELECT MAX(s2.ts)
-             FROM market_snapshots s2
-             WHERE s2.market_id = m.market_id
-               AND s2.ts <= ?
-         )
-        WHERE m.market_id != ?
-          AND m.domain = ?
-        ORDER BY m.market_id
-        """,
-        (isoformat(as_of), market_id, str(domain_row["domain"])),
-    ).fetchall()
+    event_id = str(domain_row["event_id"]).strip() if domain_row["event_id"] else None
+    event_outcome_tokens = get_event_outcome_tokens(conn, market_id)
+    outcome_tokens = event_outcome_tokens if len(event_outcome_tokens) > 1 else []
+    outcome_count = len(outcome_tokens) if outcome_tokens else 2
+
+    if outcome_tokens and event_id:
+        rows = conn.execute(
+            """
+            SELECT m.market_id, m.title, s.mid, s.best_bid, s.best_ask, s.ts
+            FROM markets m
+            JOIN market_snapshots s
+              ON s.market_id = m.market_id
+             AND s.ts = (
+                 SELECT MAX(s2.ts)
+                 FROM market_snapshots s2
+                 WHERE s2.market_id = m.market_id
+                   AND s2.ts <= ?
+             )
+            WHERE m.market_id != ?
+              AND m.event_id = ?
+            ORDER BY m.title COLLATE NOCASE, m.market_id
+            """,
+            (isoformat(as_of), market_id, event_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT m.market_id, m.title, s.mid, s.best_bid, s.best_ask, s.ts
+            FROM markets m
+            JOIN market_snapshots s
+              ON s.market_id = m.market_id
+             AND s.ts = (
+                 SELECT MAX(s2.ts)
+                 FROM market_snapshots s2
+                 WHERE s2.market_id = m.market_id
+                   AND s2.ts <= ?
+             )
+            WHERE m.market_id != ?
+              AND m.domain = ?
+            ORDER BY m.market_id
+            """,
+            (isoformat(as_of), market_id, str(domain_row["domain"])),
+        ).fetchall()
     related: list[dict[str, Any]] = []
     for row in rows:
         related.append(
@@ -662,6 +739,9 @@ def get_related_markets_as_of(
                 "best_bid": float(row["best_bid"]),
                 "best_ask": float(row["best_ask"]),
                 "ts": str(row["ts"]),
+                "event_id": event_id,
+                "outcome_count": outcome_count,
+                "outcome_tokens": list(outcome_tokens),
             }
         )
     return related

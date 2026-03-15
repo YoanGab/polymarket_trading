@@ -5,10 +5,14 @@ from typing import Any
 
 from .market_categories import has_any_category
 from .types import (
+    AmendOrderAction,
+    CancelOrderAction,
     ForecastOutput,
     MarketState,
     OrderIntent,
     PositionState,
+    RestingOrder,
+    StrategyAction,
     StrategyConfig,
     ensure_utc,
 )
@@ -132,19 +136,20 @@ class StrategyEngine:
         position: PositionState | None,
         available_cash: float,
         no_position: PositionState | None = None,
+        resting_orders: list[RestingOrder] | None = None,
         portfolio_cash: float | None = None,
         starting_cash: float | None = None,
         total_invested: float | None = None,
         on_missed_trade: Callable[[float, str], None] | None = None,
         related_market_prices: dict[str, dict[str, Any]] | None = None,
-    ) -> list[OrderIntent]:
+    ) -> list[StrategyAction]:
         if market.status not in {"active", "open"}:
             return []
         if not self._market_category_allowed(config, market):
             return []
         yes_position = position if position is None or not position.is_no_bet else None
         held_no_position = no_position if no_position is None or no_position.is_no_bet else None
-        orders: list[OrderIntent] = []
+        orders: list[StrategyAction] = []
         if config.family == "carry_only":
             orders.extend(self._carry_only(config, market, forecast, yes_position, available_cash))
         elif config.family == "arbitrage":
@@ -207,6 +212,16 @@ class StrategyEngine:
                 )
             )
         return orders
+
+    def cancel_order(self, order_id: str) -> CancelOrderAction:
+        return CancelOrderAction(order_id=order_id)
+
+    def amend_order(self, order_id: str, new_price: float, new_quantity: float) -> AmendOrderAction:
+        return AmendOrderAction(
+            order_id=order_id,
+            new_price=new_price,
+            new_quantity=new_quantity,
+        )
 
     def _market_making(
         self,
