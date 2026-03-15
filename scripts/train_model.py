@@ -350,7 +350,7 @@ def train_xgboost(
         "eval_metric": "logloss",
         "eta": 0.02,
         "max_depth": 6,
-        "min_child_weight": 150,
+        "min_child_weight": 200,
         "subsample": 0.5,
         "colsample_bytree": 0.3,
         "reg_alpha": 8.0,
