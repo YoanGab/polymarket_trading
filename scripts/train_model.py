@@ -346,7 +346,6 @@ def train_xgboost(
     dval = xgb.DMatrix(val_scaled, label=val_y)
 
     params = {
-        "booster": "dart",
         "objective": "binary:logistic",
         "eval_metric": "logloss",
         "eta": 0.02,
@@ -356,8 +355,6 @@ def train_xgboost(
         "colsample_bytree": 0.5,
         "reg_alpha": 2.0,
         "reg_lambda": 10.0,
-        "rate_drop": 0.1,
-        "skip_drop": 0.5,
         "seed": 42,
     }
 
