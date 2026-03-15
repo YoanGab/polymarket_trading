@@ -272,7 +272,14 @@ def train(
         obs_dim = flatten_obs(sample_obs).shape[0]
         n_actions = n_markets * _ACTION_TYPES_PER_SLOT
 
-        agent = DQNAgent(obs_dim=obs_dim, n_actions=n_actions)
+        agent = DQNAgent(
+            obs_dim=obs_dim,
+            n_actions=n_actions,
+            hidden_dim=256,
+            epsilon_decay=20000,
+            batch_size=128,
+            target_update=200,
+        )
 
         # Load saved model if eval-only
         policy_path = MODELS_DIR / "rl_dqn_policy.pt"
