@@ -33,59 +33,31 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
     sports_only = list(SPORTS_CATEGORY_TAGS)
 
     return [
-        # Edge-based: all categories, conservative sizing, strong edge required
+        # Edge-based: exclude sports (model has no edge there)
         StrategyConfig(
-            name="edge_conservative",
+            name="edge_no_sports",
             family="edge_based",
             kelly_fraction=0.15,
-            edge_threshold_bps=200.0,
+            edge_threshold_bps=100.0,
             max_position_notional=600.0,
             max_holding_minutes=10080,  # 7 days
+            min_confidence=0.68,
+            use_thesis_stop=True,
+            thesis_stop_delta=0.10,
+            blocked_categories=sports_only,
+        ),
+        # Higher threshold for stronger signals
+        StrategyConfig(
+            name="edge_conviction",
+            family="edge_based",
+            kelly_fraction=0.20,
+            edge_threshold_bps=200.0,
+            max_position_notional=800.0,
+            max_holding_minutes=10080,
             min_confidence=0.70,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
-        ),
-        # Edge-based: moderate threshold for more trades
-        StrategyConfig(
-            name="edge_moderate",
-            family="edge_based",
-            kelly_fraction=0.10,
-            edge_threshold_bps=100.0,
-            max_position_notional=400.0,
-            max_holding_minutes=4320,  # 3 days
-            min_confidence=0.68,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.08,
-        ),
-        # Sports-only: fast resolution, lower threshold
-        StrategyConfig(
-            name="sports_edge",
-            family="edge_based",
-            kelly_fraction=0.15,
-            edge_threshold_bps=100.0,
-            max_position_notional=600.0,
-            max_holding_minutes=1440,  # 1 day
-            min_confidence=0.68,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.08,
-            aggressive_entry=True,
-            allowed_categories=sports_only,
-        ),
-        # Resolution convergence: sports only (where it works)
-        StrategyConfig(
-            name="sports_resolution",
-            family="resolution_convergence",
-            kelly_fraction=0.20,
-            edge_threshold_bps=100.0,
-            max_position_notional=700.0,
-            max_holding_minutes=None,
-            resolution_hours_max=24.0,
-            min_confidence=0.68,
-            extreme_low=0.35,
-            extreme_high=0.65,
-            use_thesis_stop=True,
-            thesis_stop_delta=0.07,
-            allowed_categories=sports_only,
+            blocked_categories=sports_only,
         ),
     ]
 
