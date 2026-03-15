@@ -27,14 +27,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 PREPARED_DIR = Path(__file__).resolve().parent.parent / "data" / "prepared"
 
-# GRU hyperparameters
-HIDDEN_DIM = 64
-N_LAYERS = 2
-DROPOUT = 0.2
-BATCH_SIZE = 256
-LR = 1e-3
-MAX_EPOCHS = 50
-PATIENCE = 8
+# GRU hyperparameters — optimized for speed
+HIDDEN_DIM = 32
+N_LAYERS = 1
+DROPOUT = 0.1
+BATCH_SIZE = 512
+LR = 3e-3
+MAX_EPOCHS = 20
+PATIENCE = 5
+MAX_SEQ_LEN = 128  # truncate long sequences for speed
 
 
 class MarketGRU(nn.Module):
@@ -47,11 +48,11 @@ class MarketGRU(nn.Module):
             hidden_dim,
             num_layers=n_layers,
             batch_first=True,
-            bidirectional=True,
+            bidirectional=False,
             dropout=DROPOUT if n_layers > 1 else 0.0,
         )
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(DROPOUT),
             nn.Linear(hidden_dim, 1),
@@ -60,15 +61,12 @@ class MarketGRU(nn.Module):
     def forward(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         """Forward pass. Returns logits (batch_size,)."""
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        output, _ = self.gru(packed)
-        unpacked, _ = pad_packed_sequence(output, batch_first=True)
-        # Take the output at the last valid timestep for each sequence
-        idx = (lengths - 1).long().unsqueeze(1).unsqueeze(2).expand(-1, 1, unpacked.size(2))
-        last_output = unpacked.gather(1, idx).squeeze(1)
-        return self.head(last_output).squeeze(1)
+        _, hidden = self.gru(packed)  # hidden: (n_layers, batch, hidden_dim)
+        last_hidden = hidden[-1]  # (batch, hidden_dim)
+        return self.head(last_hidden).squeeze(1)
 
     def embed(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        """Extract per-timestep embeddings (batch, max_len, hidden*2)."""
+        """Extract per-timestep embeddings (batch, max_len, hidden_dim)."""
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
         output, _ = self.gru(packed)
         unpacked, _ = pad_packed_sequence(output, batch_first=True)
@@ -76,13 +74,17 @@ class MarketGRU(nn.Module):
 
 
 def group_by_market(X: np.ndarray, y: np.ndarray, market_ids: np.ndarray):
-    """Group samples by market_id into sequences."""
+    """Group samples by market_id into sequences, truncated to MAX_SEQ_LEN."""
     markets: dict[str, list[int]] = {}
     for i, mid in enumerate(market_ids):
         mid_str = str(mid)
         if mid_str not in markets:
             markets[mid_str] = []
         markets[mid_str].append(i)
+    # Truncate long sequences (keep most recent)
+    for mid_str in markets:
+        if len(markets[mid_str]) > MAX_SEQ_LEN:
+            markets[mid_str] = markets[mid_str][-MAX_SEQ_LEN:]
     return markets
 
 
@@ -207,7 +209,7 @@ def main():
 
     # Extract per-snapshot embeddings
     print("Extracting embeddings...", flush=True)
-    embedding_dim = HIDDEN_DIM * 2  # bidirectional
+    embedding_dim = HIDDEN_DIM  # unidirectional
 
     for split_name, X_scaled, mids, markets_dict in [
         ("train", X_train_scaled, train_mids, train_markets),
