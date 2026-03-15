@@ -15,6 +15,7 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 MIN_ORDER_QUANTITY = 1.0
+MIN_ARBITRAGE_PAIR_PRICE = 0.998
 
 
 def _apply_volume_cap(quantity: float, config: StrategyConfig, market: MarketState) -> float:
@@ -144,6 +145,18 @@ class StrategyEngine:
         orders: list[OrderIntent] = []
         if config.family == "carry_only":
             orders.extend(self._carry_only(config, market, forecast, yes_position, available_cash))
+        elif config.family == "arbitrage":
+            orders.extend(
+                self._arbitrage(
+                    config,
+                    market,
+                    available_cash,
+                    portfolio_cash=portfolio_cash,
+                    starting_cash=starting_cash,
+                    total_invested=total_invested,
+                    on_missed_trade=on_missed_trade,
+                )
+            )
         elif config.family in {"news_driven", "edge_based"}:
             orders.extend(
                 self._edge_based(
@@ -329,6 +342,76 @@ class StrategyEngine:
                 )
             ]
         return []
+
+    def _arbitrage(
+        self,
+        config: StrategyConfig,
+        market: MarketState,
+        available_cash: float,
+        *,
+        portfolio_cash: float | None = None,
+        starting_cash: float | None = None,
+        total_invested: float | None = None,
+        on_missed_trade: Callable[[float, str], None] | None = None,
+    ) -> list[OrderIntent]:
+        yes_ask = normalized_ask_price(market.best_ask)
+        no_ask = no_ask_price(market)
+        pair_price = yes_ask + no_ask
+        arbitrage_edge_bps = max(0.0, (1.0 - pair_price) * 10_000.0)
+        required_pair_price = 1.0 - max(config.edge_threshold_bps / 10_000.0, 1.0 - MIN_ARBITRAGE_PAIR_PRICE)
+        if pair_price >= required_pair_price:
+            return []
+
+        pair_cash_cap = self._entry_cash_cap(
+            config=config,
+            available_cash=available_cash,
+            portfolio_cash=portfolio_cash,
+            starting_cash=starting_cash,
+            total_invested=total_invested,
+            edge_bps=arbitrage_edge_bps,
+            on_missed_trade=on_missed_trade,
+        )
+        if pair_cash_cap <= 0:
+            return []
+
+        pair_notional = min(config.max_position_notional, pair_cash_cap)
+        if pair_notional <= 0 or pair_price <= 0:
+            return []
+
+        quantity = _apply_volume_cap(pair_notional / pair_price, config, market)
+        if quantity < MIN_ORDER_QUANTITY:
+            return []
+
+        thesis = f"Mint/redeem arbitrage: YES ask {yes_ask:.3f} + NO ask {no_ask:.3f} = {pair_price:.3f}"
+        return [
+            OrderIntent(
+                strategy_name=config.name,
+                market_id=market.market_id,
+                ts=market.ts,
+                side="buy",
+                liquidity_intent="aggressive",
+                limit_price=yes_ask,
+                requested_quantity=quantity,
+                kelly_fraction=config.kelly_fraction,
+                edge_bps=arbitrage_edge_bps,
+                holding_period_minutes=0,
+                thesis=thesis,
+            ),
+            OrderIntent(
+                strategy_name=config.name,
+                market_id=market.market_id,
+                ts=market.ts,
+                side="buy",
+                liquidity_intent="aggressive",
+                limit_price=no_ask,
+                requested_quantity=quantity,
+                kelly_fraction=config.kelly_fraction,
+                edge_bps=arbitrage_edge_bps,
+                holding_period_minutes=0,
+                thesis=thesis,
+                is_no_bet=True,
+            ),
+        ]
 
     def _edge_based(
         self,

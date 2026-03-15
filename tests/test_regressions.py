@@ -287,6 +287,62 @@ def test_market_simulator_passive_fill_earns_maker_rebate_by_default() -> None:
     assert fills[0].fee_usdc == pytest.approx(0.0)
 
 
+def test_market_simulator_rejects_post_only_orders_that_cross() -> None:
+    simulator = MarketSimulator()
+    market = _make_market_state(datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+    intent = OrderIntent(
+        strategy_name="post-only-test",
+        market_id=market.market_id,
+        ts=market.ts,
+        side="buy",
+        liquidity_intent="passive",
+        limit_price=market.best_ask,
+        requested_quantity=10.0,
+        kelly_fraction=0.1,
+        edge_bps=25.0,
+        holding_period_minutes=60,
+        thesis="Must rest on the book",
+        order_type="post_only",
+    )
+
+    fills = simulator.simulate(
+        order_id="order-post-only",
+        market=market,
+        next_market=None,
+        intent=intent,
+    )
+
+    assert fills == []
+
+
+def test_market_simulator_rejects_partial_fill_for_fok() -> None:
+    simulator = MarketSimulator()
+    market = _make_market_state(datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+    intent = OrderIntent(
+        strategy_name="fok-test",
+        market_id=market.market_id,
+        ts=market.ts,
+        side="buy",
+        liquidity_intent="aggressive",
+        limit_price=market.best_ask,
+        requested_quantity=600.0,
+        kelly_fraction=0.1,
+        edge_bps=25.0,
+        holding_period_minutes=60,
+        thesis="All or nothing",
+        order_type="fok",
+    )
+
+    fills = simulator.simulate(
+        order_id="order-fok",
+        market=market,
+        next_market=None,
+        intent=intent,
+    )
+
+    assert fills == []
+
+
 def test_ml_transport_confidence_uses_tradable_edge() -> None:
     transport = object.__new__(MLModelTransport)
     transport.agent_name = "ml_model"

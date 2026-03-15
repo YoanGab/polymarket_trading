@@ -511,11 +511,6 @@ class ReplayEngine:
                 just_exited = True
 
             if just_exited:
-                self._mark_portfolio_from_market(
-                    portfolio=portfolio,
-                    strategy_name=strategy.name,
-                    market=market,
-                )
                 continue
 
             orders = self.strategy_engine.decide(
@@ -551,6 +546,13 @@ class ReplayEngine:
                     ),
                 )
 
+        for strategy in self.strategies:
+            portfolio = self.portfolios[strategy.name]
+            self._redeem_matched_pairs(
+                portfolio=portfolio,
+                strategy_name=strategy.name,
+                market=market,
+            )
             self._mark_portfolio_from_market(
                 portfolio=portfolio,
                 strategy_name=strategy.name,
@@ -1082,6 +1084,85 @@ class ReplayEngine:
                     round(unrealized, 4),
                 ),
             )
+
+    def _redeem_matched_pairs(
+        self,
+        *,
+        portfolio: StrategyPortfolio,
+        strategy_name: str,
+        market: MarketState,
+    ) -> float:
+        yes_key = _position_key(market.market_id)
+        no_key = _position_key(market.market_id, True)
+        yes_position = portfolio.positions.get(yes_key)
+        no_position = portfolio.positions.get(no_key)
+        if yes_position is None or no_position is None:
+            return 0.0
+
+        minimum_fill_quantity = getattr(getattr(self, "simulator", None), "minimum_fill_quantity", 0.01)
+        redeem_quantity = min(yes_position.quantity, no_position.quantity)
+        if redeem_quantity < minimum_fill_quantity:
+            return 0.0
+
+        yes_cost_basis = yes_position.avg_entry_price * redeem_quantity
+        no_cost_basis = no_position.avg_entry_price * redeem_quantity
+        total_cost_basis = yes_cost_basis + no_cost_basis
+        redemption_value = redeem_quantity
+        redemption_pnl = redemption_value - total_cost_basis
+        if total_cost_basis > 0:
+            yes_realized = redemption_pnl * (yes_cost_basis / total_cost_basis)
+        else:
+            yes_realized = redemption_pnl / 2.0
+        no_realized = redemption_pnl - yes_realized
+
+        portfolio.cash += redemption_value
+        portfolio.realized_pnl += redemption_pnl
+
+        logger.info(
+            "Redeeming matched pair strategy=%s market_id=%s qty=%.4f cash_in=%.4f pnl=%.4f",
+            strategy_name,
+            market.market_id,
+            redeem_quantity,
+            redemption_value,
+            redemption_pnl,
+        )
+
+        self._apply_redemption_to_position(
+            portfolio=portfolio,
+            position_key=yes_key,
+            position=yes_position,
+            redeemed_quantity=redeem_quantity,
+            realized_pnl=yes_realized,
+            redeem_ts=market.ts,
+        )
+        self._apply_redemption_to_position(
+            portfolio=portfolio,
+            position_key=no_key,
+            position=no_position,
+            redeemed_quantity=redeem_quantity,
+            realized_pnl=no_realized,
+            redeem_ts=market.ts,
+        )
+        return redeem_quantity
+
+    def _apply_redemption_to_position(
+        self,
+        *,
+        portfolio: StrategyPortfolio,
+        position_key: str,
+        position: PositionState,
+        redeemed_quantity: float,
+        realized_pnl: float,
+        redeem_ts: datetime,
+    ) -> None:
+        position.realized_pnl += realized_pnl
+        position.realized_pnl_pre_resolution += realized_pnl
+        position.quantity = max(0.0, position.quantity - redeemed_quantity)
+        if position.quantity > 0:
+            return
+        position.quantity = 0.0
+        position.closed_ts = redeem_ts
+        self._persist_and_evict_position(portfolio, position_key)
 
     def _settle_resolved_positions(self, replay_ts: datetime) -> None:
         for strategy in self.strategies:

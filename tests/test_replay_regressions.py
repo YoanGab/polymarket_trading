@@ -259,6 +259,85 @@ def test_strategy_engine_respects_category_routing() -> None:
     ) == []
 
 
+def test_arbitrage_strategy_emits_paired_yes_and_no_buys() -> None:
+    engine = StrategyEngine()
+    config = StrategyConfig(
+        name="arb_test",
+        family="arbitrage",
+        kelly_fraction=0.1,
+        edge_threshold_bps=0.0,
+        max_position_notional=250.0,
+        max_holding_minutes=None,
+    )
+    market = _make_market_state(best_bid=0.505, best_ask=0.492)
+
+    orders = engine.decide(
+        config=config,
+        market=market,
+        forecast=_make_forecast(probability_yes=0.5, confidence=0.5),
+        position=None,
+        no_position=None,
+        available_cash=100.0,
+        portfolio_cash=100.0,
+        starting_cash=100.0,
+        total_invested=0.0,
+    )
+
+    assert len(orders) == 2
+    assert {order.is_no_bet for order in orders} == {False, True}
+    assert all(order.side == "buy" for order in orders)
+    assert orders[0].requested_quantity == pytest.approx(orders[1].requested_quantity)
+    assert sorted(order.limit_price for order in orders) == pytest.approx([0.492, 0.495])
+
+
+def test_redeem_matched_pairs_converts_inventory_back_to_cash() -> None:
+    engine = object.__new__(ReplayEngine)
+    engine.simulator = SimpleNamespace(minimum_fill_quantity=0.01)
+    engine._persist_position = lambda position: None
+    market = _make_market_state(best_bid=0.49, best_ask=0.51)
+    opened_ts = market.ts - timedelta(hours=2)
+    portfolio = StrategyPortfolio(
+        cash=10.0,
+        positions={
+            "test_market": PositionState(
+                strategy_name="arb_test",
+                market_id=market.market_id,
+                quantity=5.0,
+                avg_entry_price=0.48,
+                total_opened_quantity=5.0,
+                total_opened_notional=2.4,
+                opened_ts=opened_ts,
+                entry_probability=0.52,
+                thesis="YES leg",
+            ),
+            "test_market:NO": PositionState(
+                strategy_name="arb_test",
+                market_id=market.market_id,
+                quantity=5.0,
+                avg_entry_price=0.50,
+                total_opened_quantity=5.0,
+                total_opened_notional=2.5,
+                opened_ts=opened_ts,
+                entry_probability=0.48,
+                thesis="NO leg",
+                is_no_bet=True,
+            ),
+        },
+    )
+
+    redeemed = ReplayEngine._redeem_matched_pairs(
+        engine,
+        portfolio=portfolio,
+        strategy_name="arb_test",
+        market=market,
+    )
+
+    assert redeemed == pytest.approx(5.0)
+    assert portfolio.cash == pytest.approx(15.0)
+    assert portfolio.realized_pnl == pytest.approx(0.1)
+    assert portfolio.positions == {}
+
+
 def test_apply_market_category_metadata_overrides_fees() -> None:
     engine = object.__new__(ReplayEngine)
     engine.market_categories = {

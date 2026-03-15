@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS markets (
     title TEXT NOT NULL,
     domain TEXT NOT NULL,
     market_type TEXT NOT NULL,
+    event_id TEXT,
+    tags_json TEXT NOT NULL DEFAULT '[]',
     open_ts TEXT NOT NULL,
     close_ts TEXT,
     resolution_ts TEXT,
@@ -37,6 +39,9 @@ CREATE TABLE IF NOT EXISTS market_rule_revisions (
 
 CREATE INDEX IF NOT EXISTS idx_rule_revisions_market_ts
     ON market_rule_revisions (market_id, effective_ts);
+
+CREATE INDEX IF NOT EXISTS idx_markets_event_id
+    ON markets (event_id);
 
 CREATE TABLE IF NOT EXISTS market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

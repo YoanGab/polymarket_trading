@@ -122,6 +122,7 @@ class StrategyConfig:
         "carry_only",
         "news_driven",
         "edge_based",
+        "arbitrage",
         "mean_reversion",
         "contrarian",
         "momentum",
@@ -217,6 +218,7 @@ class OrderIntent:
     holding_period_minutes: int | None
     thesis: str
     is_no_bet: bool = False
+    order_type: Literal["default", "fok", "post_only"] = "default"
 
     def __post_init__(self) -> None:
         if not (0.001 <= self.limit_price <= 0.999):

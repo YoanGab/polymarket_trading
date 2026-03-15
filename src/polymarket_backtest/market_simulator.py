@@ -74,11 +74,15 @@ class MarketSimulator:
     ) -> list[FillResult]:
         effective_market = self._market_for_intent(market, intent)
         effective_next_market = self._market_for_intent(next_market, intent) if next_market is not None else None
+        if intent.order_type == "post_only" and self._would_cross_spread(effective_market, intent):
+            return []
         estimate = (
             self._simulate_aggressive(effective_market, intent)
             if intent.liquidity_intent == "aggressive"
             else self._simulate_passive(effective_market, effective_next_market, intent)
         )
+        if intent.order_type == "fok" and estimate.quantity + 1e-12 < intent.requested_quantity:
+            return []
         if estimate.quantity < self.minimum_fill_quantity:
             return []
 
@@ -467,6 +471,14 @@ class MarketSimulator:
         if side == "buy":
             return execution_price <= limit_price + tolerance
         return execution_price >= limit_price - tolerance
+
+    def _would_cross_spread(self, market: MarketState | None, intent: OrderIntent) -> bool:
+        if market is None:
+            return False
+        tolerance = market.tick_size / 2.0 + 1e-12
+        if intent.side == "buy":
+            return intent.limit_price >= market.best_ask - tolerance
+        return intent.limit_price <= market.best_bid + tolerance
 
     def _price_matches(self, lhs: float, rhs: float, tick_size: float) -> bool:
         return abs(lhs - rhs) <= tick_size / 2.0 + 1e-12
