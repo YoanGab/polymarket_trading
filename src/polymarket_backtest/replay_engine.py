@@ -130,15 +130,30 @@ class ReplayEngine:
         if market_ids is not None and not market_ids:
             return {}
 
-        params: tuple[str, ...] = ()
-        query = "SELECT market_id, ts FROM market_snapshots"
-        if market_ids is not None:
-            placeholders = ", ".join("?" for _ in market_ids)
-            query += f" WHERE market_id IN ({placeholders})"
-            params = tuple(market_ids)
-        query += " ORDER BY market_id, ts"
-
-        rows = self.conn.execute(query, params).fetchall()
+        if market_ids is not None and len(market_ids) > 900:
+            # Use temp table to avoid SQLite's 999-variable limit
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS _selected_markets (market_id TEXT PRIMARY KEY)")
+            self.conn.execute("DELETE FROM _selected_markets")
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO _selected_markets VALUES (?)",
+                [(m,) for m in market_ids],
+            )
+            self.conn.commit()
+            query = (
+                "SELECT ms.market_id, ms.ts FROM market_snapshots ms "
+                "JOIN _selected_markets sm ON sm.market_id = ms.market_id "
+                "ORDER BY ms.market_id, ms.ts"
+            )
+            rows = self.conn.execute(query).fetchall()
+        else:
+            params: tuple[str, ...] = ()
+            query = "SELECT market_id, ts FROM market_snapshots"
+            if market_ids is not None:
+                placeholders = ", ".join("?" for _ in market_ids)
+                query += f" WHERE market_id IN ({placeholders})"
+                params = tuple(market_ids)
+            query += " ORDER BY market_id, ts"
+            rows = self.conn.execute(query, params).fetchall()
         timelines: dict[str, list[datetime]] = {}
         for row in rows:
             market_id = str(row["market_id"])
@@ -196,16 +211,33 @@ class ReplayEngine:
                     self._next_ts_cache[(market_id, ts_key)] = None
 
         # Batch load market metadata (one row per market — fast)
-        placeholders = ", ".join("?" for _ in all_market_ids)
+        # Use temp table for large market sets to avoid SQLite's 999-variable limit
+        use_temp = len(all_market_ids) > 900
+        if use_temp:
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS _selected_markets (market_id TEXT PRIMARY KEY)")
+            self.conn.execute("DELETE FROM _selected_markets")
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO _selected_markets VALUES (?)",
+                [(m,) for m in all_market_ids],
+            )
+            meta_filter = "JOIN _selected_markets sm ON sm.market_id = markets.market_id"
+            rule_filter = "JOIN _selected_markets sm ON sm.market_id = market_rule_revisions.market_id"
+            meta_params: tuple[str, ...] = ()
+        else:
+            placeholders = ", ".join("?" for _ in all_market_ids)
+            meta_filter = f"WHERE market_id IN ({placeholders})"
+            rule_filter = f"WHERE market_id IN ({placeholders})"
+            meta_params = tuple(all_market_ids)
+
         market_meta: dict[str, Any] = {}
         meta_rows = self.conn.execute(
             f"""
             SELECT market_id, title, domain, market_type, resolution_ts,
                    fees_enabled, fee_rate, fee_exponent, maker_rebate_rate
             FROM markets
-            WHERE market_id IN ({placeholders})
+            {meta_filter}
             """,
-            tuple(all_market_ids),
+            meta_params,
         ).fetchall()
         for mr in meta_rows:
             market_meta[str(mr["market_id"])] = mr
@@ -216,10 +248,10 @@ class ReplayEngine:
             f"""
             SELECT market_id, rules_text, additional_context, effective_ts
             FROM market_rule_revisions
-            WHERE market_id IN ({placeholders})
+            {rule_filter}
             ORDER BY market_id, effective_ts DESC
             """,
-            tuple(all_market_ids),
+            meta_params,
         ).fetchall()
         for rr in rule_rows:
             mid = str(rr["market_id"])
@@ -561,8 +593,10 @@ class ReplayEngine:
     def _settlement_fee_rate(self, market_id: str) -> float:
         """Return the fee rate to apply on profitable settlement payouts.
 
-        Reads the fee_rate from the markets table; falls back to the
-        Polymarket default of 2%.
+        Polymarket charges 2% on net winnings. The DB may have fee_rate=0
+        due to the Gamma API returning feesEnabled=false for resolved
+        markets, but fees ARE always charged on the real CLOB exchange.
+        We default to 0.02 (2%) when the DB value is 0 or missing.
         """
         row = self.conn.execute(
             "SELECT fee_rate FROM markets WHERE market_id = ?",
@@ -570,7 +604,9 @@ class ReplayEngine:
         ).fetchone()
         if row is not None:
             try:
-                return float(row["fee_rate"])
+                rate = float(row["fee_rate"])
+                if rate > 0:
+                    return rate
             except (KeyError, TypeError, ValueError):
                 pass
         return 0.02
