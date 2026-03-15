@@ -328,8 +328,14 @@ def train(
                     after_signature = _position_signature(env, targeted_market_id)
                     ep_trades += _did_execute_trade(before_signature, after_signature)
 
+                # Reward shaping: clip extreme rewards, add small cash penalty
+                shaped_reward = float(np.clip(reward, -50, 50))
+                # Small penalty for idle cash (encourages trading)
+                cash_frac = next_obs_dict["portfolio"][0] if len(next_obs_dict["portfolio"]) > 0 else 1.0
+                shaped_reward -= 0.01 * float(cash_frac)
+
                 if not eval_only:
-                    agent.store(obs, action_idx, reward, next_obs, terminated or truncated)
+                    agent.store(obs, action_idx, shaped_reward, next_obs, terminated or truncated)
                     agent.train_step()
 
                 ep_return += float(reward)
