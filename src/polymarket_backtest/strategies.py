@@ -635,6 +635,10 @@ class StrategyEngine:
         if forecast.confidence < config.min_confidence:
             return []
 
+        # Skip very low-priced markets (longshot bias, not real edge)
+        if market.mid < 0.10:
+            return []
+
         # Only enter when model predicts YES price is too HIGH (sell signal)
         no_ask = no_ask_price(market)
         no_probability = 1.0 - forecast.probability_yes
