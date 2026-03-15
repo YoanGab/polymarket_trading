@@ -177,10 +177,29 @@ def train(split: str = "train", timeout_seconds: int = 600, n_markets: int = 5, 
                 next_obs_dict, reward, terminated, truncated, _ = env.step(actions)
                 next_obs = flatten_obs(next_obs_dict)
 
-                # Reward shaping: clip and add small cash penalty
-                shaped_reward = float(np.clip(reward, -50, 50))
-                cash_frac = next_obs_dict["portfolio"][0] if len(next_obs_dict["portfolio"]) > 0 else 1.0
-                shaped_reward -= 0.01 * float(cash_frac)
+                # Risk-aware reward: differential Sharpe + drawdown penalty + edge bonus
+                pnl_norm = float(reward) / 1000.0  # normalize by starting cash
+
+                # Differential Sharpe (EWMA)
+                if not hasattr(env, "_rl_mu"):
+                    env._rl_mu = 0.0
+                    env._rl_sigma2 = 1e-4
+                    env._rl_peak = 1000.0
+                env._rl_mu = 0.97 * env._rl_mu + 0.03 * pnl_norm
+                env._rl_sigma2 = 0.97 * env._rl_sigma2 + 0.03 * pnl_norm**2
+                sharpe_component = env._rl_mu / (np.sqrt(env._rl_sigma2) + 1e-6)
+
+                # Drawdown penalty
+                portfolio_val = (
+                    float(next_obs_dict.get("portfolio", [1.0])[4])
+                    if len(next_obs_dict.get("portfolio", [])) > 4
+                    else 1.0
+                )
+                env._rl_peak = max(env._rl_peak, portfolio_val * 1000)
+                dd = (env._rl_peak - portfolio_val * 1000) / max(env._rl_peak, 1.0)
+                dd_penalty = -2.0 * dd
+
+                shaped_reward = float(np.clip(0.5 * sharpe_component + 0.3 * pnl_norm + 0.15 * dd_penalty, -5.0, 5.0))
 
                 if not eval_only:
                     agent.store(obs, action_idx, shaped_reward, next_obs, terminated or truncated)
