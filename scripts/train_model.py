@@ -348,7 +348,7 @@ def train_xgboost(
     params = {
         "objective": "binary:logistic",
         "eval_metric": "logloss",
-        "eta": 0.01,
+        "eta": 0.02,
         "max_depth": 0,  # unlimited depth for lossguide
         "max_leaves": 512,
         "grow_policy": "lossguide",
@@ -363,9 +363,9 @@ def train_xgboost(
     model = xgb.train(
         params,
         dtrain,
-        num_boost_round=2500,
+        num_boost_round=1200,
         evals=[(dval, "val")],
-        early_stopping_rounds=200,
+        early_stopping_rounds=120,
         verbose_eval=False,
     )
 

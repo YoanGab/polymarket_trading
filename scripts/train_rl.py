@@ -96,11 +96,20 @@ def make_env(n_markets: int = 10, split: str = "train"):
             ).fetchall()
             return [str(row["market_id"]) for row in rows]
 
+    # Try to load ML screener for hybrid mode
+    try:
+        screener = SimpleMLScreener()
+        print("  ML screener loaded — hybrid ML+RL mode", flush=True)
+    except FileNotFoundError:
+        screener = None
+
     return _TrainingPolymarketMultiMarketGymEnv(
         db_path=str(DB_PATH),
         starting_cash=1000,
         n_markets=n_markets,
         split=split,
+        ml_screener=screener,
+        enable_ml_predictions=screener is not None,
     )
 
 
