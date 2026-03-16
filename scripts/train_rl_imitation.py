@@ -109,15 +109,33 @@ def obs_dim_for(n_markets: int) -> int:
 # ── Expert (sell_edge) Policy ────────────────────────────────────
 
 
+_ML_EDGES: dict[str, float] | None = None
+
+
+def _load_ml_edges() -> dict[str, float]:
+    """Load pre-computed ML edges for expert policy."""
+    global _ML_EDGES
+    if _ML_EDGES is None:
+        import pickle
+
+        path = MODELS_DIR / "market_ml_edges.pkl"
+        if path.exists():
+            with open(path, "rb") as f:
+                _ML_EDGES = pickle.load(f)  # noqa: S301
+        else:
+            _ML_EDGES = {}
+    return _ML_EDGES
+
+
 def sell_edge_expert_action(env, obs_dict: dict[str, np.ndarray]) -> np.ndarray:
-    """Compute the sell_edge expert action using market features.
+    """Compute the sell_edge expert action using ML model predictions.
 
     Expert logic per slot:
-    - Buy NO when mid >= 0.10 AND price shows overpricing signals
+    - Buy NO when ML model says YES is overpriced (edge < -100bps)
     - Sell NO when position PnL hits take-profit or stop-loss
     - Hold otherwise
 
-    Uses price-based heuristics that mimic the ML model's sell_edge strategy.
+    Uses pre-computed ML edges for accurate market selection.
     """
     n_markets = env.n_markets
     actions = np.zeros(n_markets, dtype=np.int64)
@@ -147,31 +165,17 @@ def sell_edge_expert_action(env, obs_dict: dict[str, np.ndarray]) -> np.ndarray:
                 has_no_position = True
                 break
 
-        # Price-based sell edge detection (approximates the ML model)
-        # The XGBoost model's top features are: trend, trend_pct, spread_pct, mid
-        # Key insight: buy NO when mid is "too high" relative to momentum
-        trend = float(features[8]) if len(features) > 8 else 0.0  # trend (mid - last_trade)
-        spread_pct_norm = float(features[4]) if len(features) > 4 else 0.0  # spread_pct / 0.1
+        # Use pre-computed ML edges for accurate expert decisions
+        ml_edges = _load_ml_edges()
+        ml_prob = ml_edges.get(market_id, mid)  # fall back to mid if no ML prediction
+        ml_edge = ml_prob - mid  # negative = model thinks YES is overpriced
 
         if not has_no_position:
-            # Entry: buy NO when YES looks overpriced
-            # Conditions that match the ML model's sell signals:
-            # 1. Mid >= 0.10 (longshot filter)
-            # 2. Mid is declining (trend < 0) OR mid > 0.50 (more likely NO)
-            # 3. Not extremely low priced (mid > 0.05)
-            should_buy_no = False
-            if mid >= 0.10:
-                # Strong signal: price declining AND above 50%
-                if trend < -0.005 and mid > 0.30:
-                    should_buy_no = True
-                # Medium signal: high mid price (>60%) suggests overpricing
-                elif mid > 0.60:
-                    should_buy_no = True
-                # Weak signal: moderate mid with wide spread (uncertainty)
-                elif mid > 0.35 and spread_pct_norm > 0.3:
-                    should_buy_no = True
-
-            if should_buy_no:
+            # Entry: buy NO when ML model says YES is overpriced
+            # Conditions (matching sell_edge strategy):
+            # 1. ml_edge < -0.01 (ML says YES overpriced by >100bps)
+            # 2. mid >= 0.10 (longshot filter)
+            if ml_edge < -0.01 and mid >= 0.10:
                 actions[slot_idx] = 2  # buy_no
         else:
             # Exit: sell NO when PnL hits targets
