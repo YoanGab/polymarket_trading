@@ -44,10 +44,47 @@ _PORTFOLIO_DIM = 5
 # ── Environment Setup ────────────────────────────────────────────
 
 
+class _PrecomputedMLScreener:
+    """ML screener using pre-computed XGBoost predictions.
+
+    Loads market_id → P(YES) from models/market_ml_edges.pkl.
+    Returns markets sorted by sell edge (most overpriced YES first).
+    """
+
+    def __init__(self) -> None:
+        import pickle
+
+        path = MODELS_DIR / "market_ml_edges.pkl"
+        if path.exists():
+            with open(path, "rb") as f:
+                self._edges: dict[str, float] = pickle.load(f)  # noqa: S301
+        else:
+            self._edges = {}
+
+    def rank_markets(
+        self,
+        market_ids: list[str],
+        as_of: object,
+    ) -> list[tuple[str, float, float]]:
+        """Return markets sorted by sell edge (strongest first)."""
+        results = []
+        for mid in market_ids:
+            ml_prob = self._edges.get(mid, 0.5)
+            # Edge: negative = model thinks YES is overpriced
+            edge_bps = (ml_prob - 0.5) * 10000  # approximate edge vs 0.5
+            results.append((mid, ml_prob, edge_bps))
+        # Sort by edge (most negative = strongest sell signal first)
+        results.sort(key=lambda x: x[2])
+        return results
+
+
 def make_env(n_markets: int = 5, split: str = "train"):
-    """Create the multi-market gym env with AssertionError handling."""
+    """Create the multi-market gym env with ML screener and error handling."""
     from polymarket_backtest.gym_env_multi import PolymarketMultiMarketGymEnv
     from polymarket_backtest.splits import HOLDOUT_CUTOFF, TRAIN_CUTOFF, VAL_CUTOFF
+
+    # Load ML screener for market ranking + edge signals in observations
+    screener = _PrecomputedMLScreener()
 
     class _ImitationEnv(PolymarketMultiMarketGymEnv):
         def _market_ids_for_split(self, split_name: str) -> list[str]:
@@ -86,6 +123,7 @@ def make_env(n_markets: int = 5, split: str = "train"):
         starting_cash=1000,
         n_markets=n_markets,
         split=split,
+        ml_screener=screener,
     )
 
 
@@ -165,9 +203,9 @@ def sell_edge_expert_action(env, obs_dict: dict[str, np.ndarray]) -> np.ndarray:
                 has_no_position = True
                 break
 
-        # Use pre-computed ML edges for accurate expert decisions
-        ml_edges = _load_ml_edges()
-        ml_prob = ml_edges.get(market_id, mid)  # fall back to mid if no ML prediction
+        # Use ML edges from observation (populated by the screener)
+        ml_prob = float(obs_dict["ml_edges"][slot_idx, 0])
+        ml_edge_bps = float(obs_dict["ml_edges"][slot_idx, 1])
         ml_edge = ml_prob - mid  # negative = model thinks YES is overpriced
 
         if not has_no_position:
