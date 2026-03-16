@@ -347,7 +347,7 @@ def train_xgboost(
 
     params = {
         "objective": "binary:logistic",
-        "eval_metric": "rmse",  # RMSE ≈ sqrt(Brier) for binary classification
+        "eval_metric": "logloss",
         "eta": 0.02,
         "max_depth": 0,  # unlimited depth for lossguide
         "max_leaves": 384,
