@@ -48,7 +48,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             aggressive_entry=True,
             blocked_categories=sports_only,
         ),
-        # Sell-edge: moderate threshold, optimized Kelly
+        # Sell-edge: moderate threshold, optimized Kelly + wider stop
         StrategyConfig(
             name="sell_edge_moderate",
             family="sell_edge",
@@ -59,7 +59,7 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             min_confidence=0.65,
             max_portfolio_pct=0.25,
             use_thesis_stop=True,
-            thesis_stop_delta=0.10,
+            thesis_stop_delta=0.15,
             aggressive_entry=True,
             blocked_categories=sports_only,
         ),
