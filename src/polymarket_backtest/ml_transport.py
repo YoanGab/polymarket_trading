@@ -41,7 +41,7 @@ class MLModelTransport:
 
         # Try to load GRU model for blending (optional)
         self._gru_model = None
-        self._gru_blend_weight = 0.12  # 88% XGBoost + 12% GRU
+        self._gru_blend_weight = 0.0  # disabled — GRU blend hurts avg Sharpe on realistic env
         gru_path = MODELS_DIR.parent / "data" / "prepared" / "gru_model.pt"
         if gru_path.exists():
             try:
