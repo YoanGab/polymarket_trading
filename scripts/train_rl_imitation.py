@@ -790,14 +790,7 @@ def ppo_fine_tune(
                 if current_sharpe > policy._best_sharpe:  # type: ignore[attr-defined]
                     policy._best_sharpe = current_sharpe  # type: ignore[attr-defined]
                     best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
-                    torch.save(
-                        {
-                            "policy": policy.state_dict(),
-                            "obs_dim": policy.trunk[0].in_features,
-                            "n_markets": (policy.slot_head[0].in_features - policy.trunk[-2].out_features) // 33,
-                        },
-                        best_path,
-                    )
+                    torch.save({"policy": policy.state_dict()}, best_path)
                     print(f"  *** Best checkpoint: Sharpe={current_sharpe:.4f} ***", flush=True)
 
         # Logging
