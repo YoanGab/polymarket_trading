@@ -108,6 +108,8 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
         "max_drawdown": 0.0,
         "price_position_in_range": 0.5,
         "spread_trend": 0.0,
+        "ema_cross_12_24": 0.0,
+        "volume_spike_ratio": 1.0,
     }
     for lookback in MOMENTUM_LOOKBACKS:
         history_defaults[f"momentum_{lookback}h"] = 0.0
@@ -214,6 +216,31 @@ def extract_snapshot_features(row: sqlite3.Row, prev_rows: list[sqlite3.Row]) ->
             features["spread_trend"] = float(np.mean(prev_spreads[-3:])) - float(np.mean(prev_spreads[:3]))
         else:
             features["spread_trend"] = 0.0
+
+        # 7. EMA cross (12h vs 24h) — trend change detection
+        if n >= 24:
+
+            def _ema(values, span):
+                alpha = 2.0 / (span + 1)
+                result = values[0]
+                for v in values[1:]:
+                    result = alpha * v + (1 - alpha) * result
+                return result
+
+            ema_12 = _ema(mids_arr[-min(24, n) :].tolist(), 12)
+            ema_24 = _ema(mids_arr[-min(48, n) :].tolist(), 24)
+            features["ema_cross_12_24"] = ema_12 - ema_24
+        else:
+            features["ema_cross_12_24"] = 0.0
+
+        # 8. Volume spike ratio (recent vs average)
+        if len(prev_rows) >= 12:
+            recent_vols = [float(r["volume_24h"]) for r in prev_rows[-6:]]
+            older_vols = [float(r["volume_24h"]) for r in prev_rows[-12:-6]]
+            avg_older = float(np.mean(older_vols)) if older_vols else 1.0
+            features["volume_spike_ratio"] = float(np.mean(recent_vols)) / max(avg_older, 1.0)
+        else:
+            features["volume_spike_ratio"] = 1.0
 
     return features
 

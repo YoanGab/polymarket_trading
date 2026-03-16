@@ -1159,6 +1159,8 @@ def main() -> None:
         "max_drawdown",
         "price_position_in_range",
         "spread_trend",
+        "ema_cross_12_24",
+        "volume_spike_ratio",
         # Tag features — available via market.tags in context_bundle
         "n_tags",
     }
