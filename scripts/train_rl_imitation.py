@@ -66,16 +66,17 @@ class _PrecomputedMLScreener:
         market_ids: list[str],
         as_of: object,
     ) -> list[tuple[str, float, float]]:
-        """Return markets sorted by sell edge (strongest first)."""
+        """Return markets with ML edges but preserve original order.
+
+        Does NOT sort by edge — preserves the random market selection
+        so RL training sees diverse markets, not just high-edge ones.
+        """
         results = []
         for mid in market_ids:
             ml_prob = self._edges.get(mid, 0.5)
-            # Edge: negative = model thinks YES is overpriced
-            edge_bps = (ml_prob - 0.5) * 10000  # approximate edge vs 0.5
+            edge_bps = (ml_prob - 0.5) * 10000
             results.append((mid, ml_prob, edge_bps))
-        # Sort by edge (most negative = strongest sell signal first)
-        results.sort(key=lambda x: x[2])
-        return results
+        return results  # keep original order
 
 
 def make_env(n_markets: int = 5, split: str = "train"):
