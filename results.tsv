@@ -1,0 +1,19 @@
+commit	val_brier	sharpe	pnl	trades	status	description
+=== FINAL RESULTS ===
+=== ML STRATEGY (sell_edge, realistic env, 200 val markets) ===
+47ac40d	-	2.63	+496	31	keep	seed=42, avg across seeds: 2.65
+=== RL AGENT (imitation + PPO, gym env, all 5 actions per slot) ===
+c2d4ff0	-	1.55	+10411	4.3/ep	keep	val: 2hr checkpointed, 86% win ← BEST RL
+31fe2c6	-	1.29	+8534	4.5/ep	keep	val: 4hr intermediate checkpoint
+6de5c33	-	0.87	+7198	2.7/ep	keep	val: 2hr price-heuristic
+=== ARCHITECTURE ===
+ML: XGBoost lossguide 384 leaves, 95 features (42 numerical + 6 temporal + 50 tags - 3 dropped)
+RL: BC (ML-edge expert) → PPO (lr=1e-5, no adv norm), best-Sharpe checkpoint
+Strategy: sell_edge (buy NO when YES overpriced), no sports, mid≥10%
+Kelly=0.30, thesis_stop_delta=0.15, max_portfolio_pct=0.25
+GRU: 32-dim temporal embeddings (available, disabled in transport)
+Volume filter: 50K min lifetime volume
+2026-03-16T12:31:27	sell_edge_moderate	0.850000	+452.51	2.2566	-0.0028	27	37.5
+2026-03-16T12:32:17	sell_edge_moderate	0.850000	+452.51	2.2566	-0.0028	27	36.3
+2026-03-16T12:33:26	sell_edge_wide	0.550000	-35.82	1.5062	+0.0029	70	68.9
+2026-03-16T12:33:54	sell_edge_moderate	0.550000	+203.70	3.7193	-0.0027	23	27.3
