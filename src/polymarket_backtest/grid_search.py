@@ -48,16 +48,16 @@ def expanded_strategy_grid() -> list[StrategyConfig]:
             aggressive_entry=True,
             blocked_categories=sports_only,
         ),
-        # Sell-edge: moderate threshold
+        # Sell-edge: moderate threshold, optimized Kelly
         StrategyConfig(
             name="sell_edge_moderate",
             family="sell_edge",
-            kelly_fraction=0.15,
+            kelly_fraction=0.30,
             edge_threshold_bps=100.0,
             max_position_notional=500.0,
             max_holding_minutes=10080,
             min_confidence=0.65,
-            max_portfolio_pct=0.20,
+            max_portfolio_pct=0.25,
             use_thesis_stop=True,
             thesis_stop_delta=0.10,
             aggressive_entry=True,
