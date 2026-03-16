@@ -74,11 +74,12 @@ class MLModelTransport:
 
                     def predict_proba(self, features_sequence):
                         import torch
+                        from torch.nn.utils.rnn import pack_padded_sequence as _pack
 
                         scaled = (features_sequence - self.scaler_mean) / self.scaler_scale
                         x = torch.tensor(scaled, dtype=torch.float32).unsqueeze(0)
                         length = torch.tensor([len(scaled)], dtype=torch.long)
-                        packed = pack_padded_sequence(x, length.cpu(), batch_first=True, enforce_sorted=False)
+                        packed = _pack(x, length.cpu(), batch_first=True, enforce_sorted=False)
                         _, hidden = self.gru(packed)
                         logit = self.head(hidden[-1]).squeeze()
                         return float(torch.sigmoid(logit).item())
