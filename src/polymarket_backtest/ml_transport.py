@@ -133,20 +133,32 @@ class MLModelTransport:
         xgb_probability = self._predict(feature_vector)[0]
 
         # Blend with GRU if available
-        if self._gru_model is not None and prev_rows:
+        # GRU needs per-snapshot feature vectors. Build from prev_snapshots (basic features only).
+        if self._gru_model is not None and len(prev_rows) >= 3:
             try:
-                # Build feature sequence from prev_snapshots + current
                 seq_features = []
-                for pr in prev_rows[-128:]:  # max 128 snapshots
-                    f = extract_snapshot_features(pr, [])
-                    for name in self._feature_names:
-                        if name.startswith("tag_"):
-                            f[name] = features.get(name, 0.0)
-                    if "n_tags" in self._feature_names:
-                        f["n_tags"] = features.get("n_tags", 0.0)
-                    vec = [f.get(n, 0.0) for n in self._feature_names]
+                for pr in prev_rows[-64:]:  # limit to last 64 for speed
+                    f = {
+                        "mid": float(pr["mid"]),
+                        "best_bid": float(pr["best_bid"]),
+                        "best_ask": float(pr["best_ask"]),
+                        "last_trade": float(pr["last_trade"]),
+                        "volume_1m": float(pr["volume_1m"]),
+                        "volume_24h": float(pr["volume_24h"]),
+                        "open_interest": float(pr["open_interest"]),
+                    }
+                    # Compute basic derived features
+                    f["spread"] = f["best_ask"] - f["best_bid"]
+                    f["spread_pct"] = f["spread"] / max(f["mid"], 0.001)
+                    f["price_vs_half"] = abs(f["mid"] - 0.5)
+                    f["price_extreme"] = max(f["mid"], 1 - f["mid"])
+                    f["volume_oi_ratio"] = f["volume_24h"] / max(f["open_interest"], 1.0)
+                    f["trend"] = f["mid"] - f["last_trade"]
+                    f["trend_pct"] = f["trend"] / max(f["mid"], 0.001)
+                    # Add all other features as 0 (tags, momentum, etc.)
+                    vec = [f.get(n, features.get(n, 0.0)) for n in self._feature_names]
                     seq_features.append(vec)
-                # Add current snapshot
+                # Current snapshot
                 seq_features.append([features.get(n, 0.0) for n in self._feature_names])
                 seq_arr = np.array(seq_features, dtype=np.float32)
                 seq_arr = np.nan_to_num(seq_arr, nan=0.0, posinf=1e6, neginf=-1e6)
