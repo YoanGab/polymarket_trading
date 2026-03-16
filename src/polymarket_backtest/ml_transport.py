@@ -83,14 +83,23 @@ class MLModelTransport:
                         logit = self.head(hidden[-1]).squeeze()
                         return float(torch.sigmoid(logit).item())
 
-                n_features = len(checkpoint.get("scaler_mean", []))
-                if n_features > 0:
+                n_gru_features = len(checkpoint.get("scaler_mean", []))
+                if n_gru_features > 0:
                     self._gru_model = _SimpleGRU(
                         checkpoint["state_dict"],
                         checkpoint["scaler_mean"],
                         checkpoint["scaler_scale"],
-                        n_features,
+                        n_gru_features,
                     )
+                    # Load prepared dataset feature names for GRU (all 98, not just 95)
+                    import json
+
+                    gru_meta_path = MODELS_DIR.parent / "data" / "prepared" / "meta.json"
+                    if gru_meta_path.exists():
+                        with open(gru_meta_path) as f:
+                            self._gru_feature_names = json.load(f)["feature_names"]
+                    else:
+                        self._gru_model = None
             except Exception:
                 self._gru_model = None  # GRU loading failed, use XGBoost only
 
@@ -155,11 +164,11 @@ class MLModelTransport:
                     f["volume_oi_ratio"] = f["volume_24h"] / max(f["open_interest"], 1.0)
                     f["trend"] = f["mid"] - f["last_trade"]
                     f["trend_pct"] = f["trend"] / max(f["mid"], 0.001)
-                    # Add all other features as 0 (tags, momentum, etc.)
-                    vec = [f.get(n, features.get(n, 0.0)) for n in self._feature_names]
+                    # Use GRU feature names (all 98, not just 95)
+                    vec = [f.get(n, features.get(n, 0.0)) for n in self._gru_feature_names]
                     seq_features.append(vec)
                 # Current snapshot
-                seq_features.append([features.get(n, 0.0) for n in self._feature_names])
+                seq_features.append([features.get(n, 0.0) for n in self._gru_feature_names])
                 seq_arr = np.array(seq_features, dtype=np.float32)
                 seq_arr = np.nan_to_num(seq_arr, nan=0.0, posinf=1e6, neginf=-1e6)
                 gru_prob = self._gru_model.predict_proba(seq_arr)
