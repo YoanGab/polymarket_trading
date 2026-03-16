@@ -110,14 +110,14 @@ def obs_dim_for(n_markets: int) -> int:
 
 
 def sell_edge_expert_action(env, obs_dict: dict[str, np.ndarray]) -> np.ndarray:
-    """Compute the sell_edge expert action for each market slot.
+    """Compute the sell_edge expert action using market features.
 
     Expert logic per slot:
-    - If market mid > 0.10 and no NO position -> buy_no (action=2)
-    - If holding NO position and edge disappeared -> sell_no (action=4)
-    - Otherwise -> hold (action=0)
+    - Buy NO when mid >= 0.10 AND price shows overpricing signals
+    - Sell NO when position PnL hits take-profit or stop-loss
+    - Hold otherwise
 
-    This mimics the sell_edge strategy which achieved Sharpe 2.65.
+    Uses price-based heuristics that mimic the ML model's sell_edge strategy.
     """
     n_markets = env.n_markets
     actions = np.zeros(n_markets, dtype=np.int64)
@@ -147,24 +147,39 @@ def sell_edge_expert_action(env, obs_dict: dict[str, np.ndarray]) -> np.ndarray:
                 has_no_position = True
                 break
 
-        if not has_no_position:
-            # Entry logic: buy NO when YES looks overpriced
-            # The sell_edge strategy buys NO when mid > threshold (overpriced YES)
-            # Use a simple heuristic: if mid > 0.55, YES is likely overpriced
-            # (conservative threshold to generate clean demonstrations)
-            if mid > 0.55 and ask > 0.10:
-                actions[slot_idx] = 2  # buy_no
+        # Price-based sell edge detection (approximates the ML model)
+        # The XGBoost model's top features are: trend, trend_pct, spread_pct, mid
+        # Key insight: buy NO when mid is "too high" relative to momentum
+        trend = float(features[8]) if len(features) > 8 else 0.0  # trend (mid - last_trade)
+        spread_pct_norm = float(features[4]) if len(features) > 4 else 0.0  # spread_pct / 0.1
 
-            # Also buy NO on high-spread markets (market maker opportunity)
-            spread_norm = float(features[4])  # spread / 0.25
-            if spread_norm > 0.3 and mid > 0.40:
+        if not has_no_position:
+            # Entry: buy NO when YES looks overpriced
+            # Conditions that match the ML model's sell signals:
+            # 1. Mid >= 0.10 (longshot filter)
+            # 2. Mid is declining (trend < 0) OR mid > 0.50 (more likely NO)
+            # 3. Not extremely low priced (mid > 0.05)
+            should_buy_no = False
+            if mid >= 0.10:
+                # Strong signal: price declining AND above 50%
+                if trend < -0.005 and mid > 0.30:
+                    should_buy_no = True
+                # Medium signal: high mid price (>60%) suggests overpricing
+                elif mid > 0.60:
+                    should_buy_no = True
+                # Weak signal: moderate mid with wide spread (uncertainty)
+                elif mid > 0.35 and spread_pct_norm > 0.3:
+                    should_buy_no = True
+
+            if should_buy_no:
                 actions[slot_idx] = 2  # buy_no
         else:
-            # Exit logic: sell NO if the edge disappeared
-            # If NO price went up (profitable) or mid dropped significantly
-            no_pnl_pct = float(features[23])  # no_pnl_pct
-            if no_pnl_pct > 0.05 or no_pnl_pct < -0.10:
-                actions[slot_idx] = 4  # sell_no (take profit or cut losses)
+            # Exit: sell NO when PnL hits targets
+            no_pnl_pct = float(features[23]) if len(features) > 23 else 0.0
+            if no_pnl_pct > 0.05:
+                actions[slot_idx] = 4  # sell_no (take profit)
+            elif no_pnl_pct < -0.15:
+                actions[slot_idx] = 4  # sell_no (cut losses)
 
     return actions
 
@@ -709,11 +724,8 @@ def ppo_fine_tune(
             lam=gae_lambda,
         )
 
-        # Normalize advantages
-        adv_mean = advantages.mean()
-        adv_std = advantages.std()
-        if adv_std > 1e-8:
-            advantages = (advantages - adv_mean) / adv_std
+        # Do NOT normalize advantages — research shows this kills calibration
+        # (Turtel et al., 2025: advantage normalization causes overconfidence collapse)
 
         # ── PPO update ──
         policy.train()
