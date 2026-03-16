@@ -790,7 +790,14 @@ def ppo_fine_tune(
                 if current_sharpe > policy._best_sharpe:  # type: ignore[attr-defined]
                     policy._best_sharpe = current_sharpe  # type: ignore[attr-defined]
                     best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
-                    torch.save(policy.state_dict(), best_path)
+                    torch.save(
+                        {
+                            "policy": policy.state_dict(),
+                            "obs_dim": policy.trunk[0].in_features,
+                            "n_markets": (policy.slot_head[0].in_features - policy.trunk[-2].out_features) // 33,
+                        },
+                        best_path,
+                    )
                     print(f"  *** Best checkpoint: Sharpe={current_sharpe:.4f} ***", flush=True)
 
         # Logging
@@ -1021,8 +1028,11 @@ def train_pipeline(
     # ── Load best checkpoint if available ──
     best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
     if best_path.exists():
-        best_state = torch.load(best_path, weights_only=False)
-        policy.load_state_dict(best_state)
+        best_data = torch.load(best_path, weights_only=False)
+        if isinstance(best_data, dict) and "policy" in best_data:
+            policy.load_state_dict(best_data["policy"])
+        else:
+            policy.load_state_dict(best_data)
         print(f"  Loaded best checkpoint from {best_path}", flush=True)
 
     # ── Save Policy ──
