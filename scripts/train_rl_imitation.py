@@ -780,6 +780,17 @@ def ppo_fine_tune(
 
         update_count += 1
 
+        # Save best policy based on rolling Sharpe
+        if len(episode_returns) >= 20 and update_count % 50 == 0:
+            recent_rets = np.array(episode_returns[-50:])
+            current_sharpe = float(np.mean(recent_rets) / max(np.std(recent_rets), 1e-8))
+            if not hasattr(ppo_fine_tune, "_best_sharpe"):
+                ppo_fine_tune._best_sharpe = -999.0  # type: ignore[attr-defined]
+            if current_sharpe > ppo_fine_tune._best_sharpe:  # type: ignore[attr-defined]
+                ppo_fine_tune._best_sharpe = current_sharpe  # type: ignore[attr-defined]
+                best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
+                torch.save(policy.state_dict(), best_path)
+
         # Logging
         if update_count % 5 == 0 and episode_returns:
             recent = episode_returns[-20:] if len(episode_returns) >= 20 else episode_returns
@@ -1004,6 +1015,13 @@ def train_pipeline(
             timeout_seconds=remaining,
             split=split,
         )
+
+    # ── Load best checkpoint if available ──
+    best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
+    if best_path.exists():
+        best_state = torch.load(best_path, weights_only=False)
+        policy.load_state_dict(best_state)
+        print(f"  Loaded best checkpoint from {best_path}", flush=True)
 
     # ── Save Policy ──
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
