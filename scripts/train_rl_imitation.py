@@ -780,16 +780,18 @@ def ppo_fine_tune(
 
         update_count += 1
 
-        # Save best policy based on rolling Sharpe
-        if len(episode_returns) >= 20 and update_count % 50 == 0:
-            recent_rets = np.array(episode_returns[-50:])
-            current_sharpe = float(np.mean(recent_rets) / max(np.std(recent_rets), 1e-8))
-            if not hasattr(ppo_fine_tune, "_best_sharpe"):
-                ppo_fine_tune._best_sharpe = -999.0  # type: ignore[attr-defined]
-            if current_sharpe > ppo_fine_tune._best_sharpe:  # type: ignore[attr-defined]
-                ppo_fine_tune._best_sharpe = current_sharpe  # type: ignore[attr-defined]
-                best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
-                torch.save(policy.state_dict(), best_path)
+        # Save best policy based on rolling Sharpe (use policy attr, not function attr)
+        if len(episode_returns) >= 5 and update_count % 20 == 0:
+            recent_rets = np.array(episode_returns[-min(30, len(episode_returns)) :])
+            if len(recent_rets) > 1 and np.std(recent_rets) > 1e-8:
+                current_sharpe = float(np.mean(recent_rets) / np.std(recent_rets))
+                if not hasattr(policy, "_best_sharpe"):
+                    policy._best_sharpe = -999.0  # type: ignore[attr-defined]
+                if current_sharpe > policy._best_sharpe:  # type: ignore[attr-defined]
+                    policy._best_sharpe = current_sharpe  # type: ignore[attr-defined]
+                    best_path = MODELS_DIR / "rl_imitation_policy_best.pt"
+                    torch.save(policy.state_dict(), best_path)
+                    print(f"  *** Best checkpoint: Sharpe={current_sharpe:.4f} ***", flush=True)
 
         # Logging
         if update_count % 5 == 0 and episode_returns:
