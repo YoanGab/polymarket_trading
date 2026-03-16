@@ -902,6 +902,7 @@ dependencies = [
     { name = "polars" },
     { name = "scikit-learn" },
     { name = "scoringrules" },
+    { name = "stable-baselines3" },
     { name = "torch" },
     { name = "tqdm" },
     { name = "xgboost" },
@@ -925,6 +926,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.39.0" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "scoringrules", specifier = ">=0.9.0" },
+    { name = "stable-baselines3", specifier = ">=2.7.1" },
     { name = "torch", specifier = ">=2.10.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "xgboost", specifier = ">=3.2.0" },
@@ -1138,6 +1140,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "stable-baselines3"
+version = "2.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "gymnasium" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c9/42/f284c28272422262a99cdf35ecd2e283fded2f75327e6d5e82a9f6d6fe62/stable_baselines3-2.7.1.tar.gz", hash = "sha256:cd90d12d9ee0d9584053f12215c1682b313be4e3a8d8007739319799c3d2c071", size = 220719, upload-time = "2025-12-05T11:22:03.691Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/cc/a3038d3833f329dcd03b2dce8b778e4b41044caff88b48429473b8629623/stable_baselines3-2.7.1-py3-none-any.whl", hash = "sha256:b017e76dfe5ca0ce6eabb29e79c42e8c7e125d5862bfcd43ce04ec19732348d0", size = 188039, upload-time = "2025-12-05T11:22:00.819Z" },
 ]
 
 [[package]]
