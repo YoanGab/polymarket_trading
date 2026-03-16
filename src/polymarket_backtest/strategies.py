@@ -639,10 +639,6 @@ class StrategyEngine:
         if market.mid < 0.10:
             return []
 
-        # Skip markets close to resolution (market already efficient, no edge)
-        if market.seconds_to_resolution is not None and market.seconds_to_resolution < 168 * 3600:
-            return []
-
         # Only enter when model predicts YES price is too HIGH (sell signal)
         no_ask = no_ask_price(market)
         no_probability = 1.0 - forecast.probability_yes
